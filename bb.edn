@@ -1,0 +1,8 @@
+{:paths ["src" "test"]
+ :tasks
+ {test
+  {:doc "Run the multiformats.core test suite (ipfs-parity vectors + round-trips; no network)."
+   :task (do (require 'clojure.test 'multiformats.core-test)
+             (let [r (clojure.test/run-tests 'multiformats.core-test)]
+               (when (pos? (+ (:fail r) (:error r)))
+                 (System/exit 1))))}}}
