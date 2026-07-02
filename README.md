@@ -47,7 +47,7 @@ input — a multi-block dag-pb tree is intentionally out of scope.
 
 ## Correctness
 
-`bb test` (no network, no ipfs at test time):
+`clojure -M:test` (no network, no ipfs at test time):
 - **CIDv1-raw vectors minted by real go-ipfs/kubo** (`ipfs add --raw-leaves`) for
   empty / `"hello\n"` / a fixed string — reproduced exactly.
 - multihash framing (`0x12 0x20` + the canonical `e3b0c442…` sha256 of empty),
@@ -55,7 +55,7 @@ input — a multi-block dag-pb tree is intentionally out of scope.
   decode round-trips.
 
 ```
-$ bb test
+$ clojure -M:test
 Ran 7 tests containing 28 assertions.
 0 failures, 0 errors.
 ```
