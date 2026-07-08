@@ -212,7 +212,14 @@
                            (seq b)))))
 
 (defn unhex [s]
-  (let [s (str/replace s #"\s" "")
-        pairs (partition 2 s)]
-    #?(:clj (byte-array (map (fn [[a b]] (unchecked-byte (Integer/parseInt (str a b) 16))) pairs))
-       :cljs (vec (map (fn [[a b]] (js/parseInt (str a b) 16)) pairs)))))
+  (let [s (str/replace s #"\s" "")]
+    (when (odd? (count s))
+      ;; `(partition 2 s)` on an odd-length string silently drops the
+      ;; trailing incomplete nibble instead of erroring -- a truncated/
+      ;; malformed hex string (an odd number of hex digits is never valid
+      ;; encoded byte data) must fail loudly, not quietly decode a
+      ;; shorter-than-intended byte array.
+      (throw (ex-info "unhex: odd-length hex string" {:s s})))
+    (let [pairs (partition 2 s)]
+      #?(:clj (byte-array (map (fn [[a b]] (unchecked-byte (Integer/parseInt (str a b) 16))) pairs))
+         :cljs (vec (map (fn [[a b]] (js/parseInt (str a b) 16)) pairs))))))
