@@ -67,6 +67,20 @@
     (let [b (utf8-bytes s)]
       (is (= (vec b) (vec (mf/base32-decode (mf/base32 b))))))))
 
+;; ── hex round-trip + odd-length rejection ─────────────────────────────────────
+(deftest hex-roundtrip
+  (doseq [ints [[] [0] [0xab] [0 1 2 250 255]]]
+    (let [b (bytes-of ints)]
+      (is (= ints (map #(bit-and % 0xff) (mf/unhex (mf/hexify b))))))))
+
+(deftest unhex-rejects-odd-length-hex-strings
+  ;; An odd number of hex digits is never valid encoded byte data;
+  ;; `(partition 2 s)` would otherwise silently drop the trailing nibble
+  ;; instead of erroring -- must fail loudly, not quietly decode a
+  ;; shorter-than-intended byte array.
+  (is (thrown? #?(:clj Exception :cljs js/Error) (mf/unhex "1")))
+  (is (thrown? #?(:clj Exception :cljs js/Error) (mf/unhex "abc"))))
+
 ;; ── CID decode round-trips its bytes ──────────────────────────────────────────
 (deftest cid-bytes-roundtrip
   (let [c (mf/cidv1-raw (utf8-bytes "round-trip"))]
