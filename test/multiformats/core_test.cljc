@@ -81,6 +81,23 @@
   (is (thrown? #?(:clj Exception :cljs js/Error) (mf/unhex "1")))
   (is (thrown? #?(:clj Exception :cljs js/Error) (mf/unhex "abc"))))
 
+(deftest base58btc-decode-rejects-invalid-characters
+  ;; b58-idx returns nil for a character outside the base58btc alphabet, and
+  ;; that nil used to flow silently into `+`/`pos?` arithmetic: on :clj this
+  ;; throws (fails closed, but only by accident of JVM unboxing -- NPE, not
+  ;; a deliberate guard); on :cljs (confirmed via a real compiled build)
+  ;; `+`/`pos?` silently coerce nil to 0, so an invalid FIRST character
+  ;; silently decoded to an EMPTY byte vector, and an invalid character
+  ;; later in the string silently decoded to the WRONG bytes -- neither
+  ;; case raised anything. "0", "O", "I", "l" are excluded from base58btc's
+  ;; alphabet specifically to avoid visual ambiguity with "o"/"0"/"1"/"I".
+  (doseq [bad ["0" "O" "I" "l" "+" "/"]]
+    (is (thrown? #?(:clj Exception :cljs js/Error) (mf/base58btc-decode bad))
+        (str "must reject invalid base58btc character as sole char: " bad)))
+  (is (thrown? #?(:clj Exception :cljs js/Error) (mf/base58btc-decode "zz0zz"))
+      "must reject invalid base58btc character mid-string, not silently
+       decode wrong bytes"))
+
 (deftest base32-decode-rejects-invalid-characters
   ;; b32-idx returns nil for a character outside the base32 alphabet, and
   ;; (int nil) throws on :clj (fails closed) but silently returns 0 on
