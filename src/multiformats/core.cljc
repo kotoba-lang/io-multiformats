@@ -64,11 +64,27 @@
   [s]
   (let [bytes (reduce
                (fn [bs c]
-                 (let [[bs carry]
+                 ;; b58-idx returns nil for a character outside the
+                 ;; alphabet. On :clj, feeding that nil into `carry` below
+                 ;; throws a NullPointerException the first time `+`/`pos?`
+                 ;; touches it (fails closed, but only by accident of the
+                 ;; JVM's own unboxing semantics, not by design). On :cljs,
+                 ;; both `+` and `pos?` silently coerce nil to 0 instead of
+                 ;; throwing (confirmed via a real compiled shadow-cljs
+                 ;; build: `(+ 290 nil)` => 290, not an error) -- so an
+                 ;; invalid character used to silently decode as if its
+                 ;; index were 0 mid-string, or -- worse -- an invalid
+                 ;; FIRST character made the whole function silently return
+                 ;; an EMPTY byte vector instead of raising anything at
+                 ;; all. Same platform-inconsistent bug class already
+                 ;; fixed in this repo's own unhex/base32-decode.
+                 (let [idx (or (b58-idx c)
+                               (throw (ex-info "multiformats: invalid base58btc character" {:char c})))
+                       [bs carry]
                        (reduce (fn [[acc carry] d]
                                  (let [v (+ (* d 58) carry)]
                                    [(conj acc (rem v 256)) (quot v 256)]))
-                               [[] (b58-idx c)] bs)]
+                               [[] idx] bs)]
                    (loop [bs bs carry carry]
                      (if (pos? carry)
                        (recur (conj bs (rem carry 256)) (quot carry 256))
