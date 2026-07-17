@@ -2,10 +2,12 @@
   "name": "multiformats-clj",
   "private": true,
   "scripts": {
-    "test:cljs": "shadow-cljs compile test && node out/test.js"
+    "test:cljs": "shadow-cljs compile test && node out/test.js",
+    "task": "nbb scripts/run-task.cljs",
+    "tasks": "nbb scripts/run-task.cljs"
   },
   "dependencies": {
-    "@noble/hashes": "2.0.1"
+    "hashes": "2.0.1"
   },
   "devDependencies": {
     "shadow-cljs": "^2.28.0"
