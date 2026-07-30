@@ -167,6 +167,65 @@
                     (recur (rest cs) buf bits acc)))))]
     #?(:clj (byte-array out) :cljs (vec out))))
 
+;; ── base64url, no padding (multibase prefix `u`, RFC 4648 §5) ─────────────────
+;; Added because base64url is a multibase encoding and this is where multibase
+;; lives, but there was no canonical implementation of it in the workspace — so
+;; every consumer that needed one grew its own (com-gmail/mime, com-teams-bot/jwt,
+;; envelope/seal, authentication/webcrypto, engi/crypto, and cacao all carry a
+;; private variant, several differing on padding). W3C vc-bitstring-status-list
+;; needs it for `encodedList`, which is signed, so a variant that disagrees about
+;; padding produces a credential nobody else can validate.
+;;
+;; No padding: multibase omits it, and RFC 4648 §3.2 makes it optional when the
+;; length is otherwise known. `base64url-decode` accepts trailing '=' anyway, so
+;; a padded value from one of the older private encoders still reads.
+(def ^:private b64url-alphabet
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+(def ^:private b64url-idx (into {} (map-indexed (fn [i c] [c i]) b64url-alphabet)))
+
+(defn base64url
+  "Bytes → base64url String with NO padding (RFC 4648 §5)."
+  [b]
+  (->> (->ints b)
+       (partition 3 3 nil)
+       (mapcat
+        (fn [chunk]
+          (let [n (count chunk)
+                [b0 b1 b2] (concat chunk (repeat (- 3 n) 0))
+                v (bit-or (bit-shift-left b0 16) (bit-shift-left b1 8) b2)
+                cs [(bit-and (bit-shift-right v 18) 0x3f)
+                    (bit-and (bit-shift-right v 12) 0x3f)
+                    (bit-and (bit-shift-right v 6) 0x3f)
+                    (bit-and v 0x3f)]]
+            ;; 3 bytes -> 4 chars, 2 -> 3, 1 -> 2. Emitting the padding chars
+            ;; instead would change the signed bytes of a multibase value.
+            (map #(alphabet-char b64url-alphabet %) (take (inc n) cs)))))
+       (apply str)))
+
+(defn base64url-decode
+  "base64url String → raw bytes (byte-array on :clj, vector of ints on :cljs).
+   Trailing '=' padding is tolerated. An out-of-alphabet character throws rather
+   than decoding as index 0 — `b64url-idx` returns nil for it, and on :cljs a nil
+   fed to `bit-or`/`bit-shift-left` is silently 0 rather than an error, the same
+   platform-inconsistent bug class already fixed in this namespace's unhex,
+   base32-decode and base58btc-decode."
+  [s]
+  (let [s (str/replace s #"=+$" "")
+        out (loop [cs (seq s) buf 0 bits 0 acc []]
+              (if (empty? cs)
+                acc
+                (let [ch (first cs)
+                      idx (or (b64url-idx ch)
+                              (throw (ex-info "multiformats: invalid base64url character"
+                                              {:char ch})))
+                      buf (bit-or (bit-shift-left buf 6) idx)
+                      bits (+ bits 6)]
+                  (if (>= bits 8)
+                    (recur (rest cs) buf (- bits 8)
+                           (conj acc (bit-and (unsigned-bit-shift-right buf (- bits 8)) 0xff)))
+                    (recur (rest cs) buf bits acc)))))]
+    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out))))
+
 ;; ── multihash (sha2-256 = 0x12, length 0x20) ──────────────────────────────────
 ;; Returns an array-like on both platforms (byte-array / Uint8Array), NOT a
 ;; plain vector on :cljs -- `aget`/`alength` (as this namespace's own docs
