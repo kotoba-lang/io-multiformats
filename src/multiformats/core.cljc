@@ -106,6 +106,21 @@
   #?(:clj (.digest (MessageDigest/getInstance "SHA-256") b)
      :cljs (.sha256 noble-sha2 b)))
 
+(defn sha384
+  "SHA-384 digest bytes (48 bytes). Same two backends as `sha256`.
+
+   Present because RDFC-1.0 (RDF Dataset Canonicalization) names SHA-384 as an
+   OPTIONAL alternative to its default SHA-256, and its official test suite covers
+   that path — so a canonicalizer that supports the parameter needs this here rather
+   than reaching for a second hash library.
+
+   NOTE SHA-384 is not simply a truncation of SHA-512: it is SHA-512 with different
+   initial state values, so `(take 48 (sha512 x))` is a DIFFERENT digest. Both
+   backends below compute the real thing."
+  [b]
+  #?(:clj (.digest (MessageDigest/getInstance "SHA-384") b)
+     :cljs (.sha384 noble-sha2 b)))
+
 ;; ── unsigned varint (LEB128) ──────────────────────────────────────────────────
 (defn varint [n]
   #?(:clj

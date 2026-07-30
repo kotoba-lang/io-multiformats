@@ -40,6 +40,34 @@
     (is (= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
            (mf/hexify (bytes-of (drop 2 (seq mh))))))))
 
+;; ── SHA-384 ───────────────────────────────────────────────────────────────────
+;; Vectors are the published FIPS 180-4 ones, verified against an independent
+;; implementation before being written here rather than recalled.
+
+(deftest sha384-matches-the-fips-180-4-vectors
+  (is (= 48 (alength (mf/sha384 (empty-bytes)))) "384 bits")
+  (is (= (str "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da"
+              "274edebfe76f65fbd51ad2f14898b95b")
+         (mf/hexify (mf/sha384 (empty-bytes))))
+      "the empty string")
+  (is (= (str "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed"
+              "8086072ba1e7cc2358baeca134c825a7")
+         (mf/hexify (mf/sha384 (utf8-bytes "abc"))))
+      "\"abc\""))
+
+(deftest sha384-is-not-a-truncated-sha512
+  ;; SHA-384 is SHA-512 with DIFFERENT initial state, so truncating SHA-512 gives
+  ;; a different digest. Asserting the two disagree keeps anyone from "optimising"
+  ;; this into (take 48 (sha512 x)) later.
+  (is (not= (subs "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd" 0 96)
+            (mf/hexify (mf/sha384 (utf8-bytes "abc"))))
+      "truncated SHA-512(\"abc\") must NOT equal SHA-384(\"abc\")"))
+
+(deftest sha384-and-sha256-are-different-functions
+  (is (not= (mf/hexify (mf/sha256 (utf8-bytes "abc")))
+            (mf/hexify (mf/sha384 (utf8-bytes "abc")))))
+  (is (= 32 (alength (mf/sha256 (empty-bytes))))))
+
 ;; ── varint ────────────────────────────────────────────────────────────────────
 (deftest varint-unsigned
   (is (= [0x00] (map #(bit-and % 0xff) (mf/varint 0))))
