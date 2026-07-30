@@ -122,3 +122,45 @@
   (let [c (mf/kotoba-cid "ibuki")]
     (is (str/starts-with? c "bafyrei"))
     (is (= [0x01 0x71 0x12 0x20] (map #(bit-and % 0xff) (take 4 (seq (mf/cid->bytes c))))))))
+
+;; ── base64url, no padding (RFC 4648 §5) ───────────────────────────────────────
+;; The RFC 4648 §10 test vectors, which pin the no-padding decision: standard
+;; base64 would render "f" as "Zg==".
+(deftest base64url-rfc4648-vectors
+  (doseq [[input expected] [["" ""]
+                            ["f" "Zg"]
+                            ["fo" "Zm8"]
+                            ["foo" "Zm9v"]
+                            ["foob" "Zm9vYg"]
+                            ["fooba" "Zm9vYmE"]
+                            ["foobar" "Zm9vYmFy"]]]
+    (is (= expected (mf/base64url (utf8-bytes input))) (str "encode " (pr-str input)))
+    (is (= (vec (map #(bit-and % 0xff) (seq (utf8-bytes input))))
+           (vec (map #(bit-and % 0xff) (seq (mf/base64url-decode expected)))))
+        (str "decode " (pr-str expected)))))
+
+(deftest base64url-uses-the-url-alphabet
+  ;; Indices 62 and 63 are '-' and '_' here, where standard base64 has '+' and '/'.
+  ;; Getting this wrong yields a value that is not URL-safe and not multibase `u`.
+  (is (= "-___" (mf/base64url (bytes-of [0xfb 0xff 0xff]))))
+  (is (= [0xfb 0xff 0xff]
+         (vec (map #(bit-and % 0xff) (seq (mf/base64url-decode "-___"))))))
+  (is (not (str/includes? (mf/base64url (bytes-of [0xfb 0xff 0xff])) "+")))
+  (is (not (str/includes? (mf/base64url (bytes-of [0xfb 0xff 0xff])) "/"))))
+
+(deftest base64url-round-trips-every-byte-value
+  (let [all (bytes-of (range 256))]
+    (is (= (vec (range 256))
+           (vec (map #(bit-and % 0xff) (seq (mf/base64url-decode (mf/base64url all)))))))))
+
+(deftest base64url-tolerates-padding-on-input
+  ;; Older private encoders in this ecosystem emit padding; decoding must still
+  ;; work so their output remains readable.
+  (is (= [102] (vec (map #(bit-and % 0xff) (seq (mf/base64url-decode "Zg==")))))))
+
+(deftest base64url-rejects-out-of-alphabet-characters
+  ;; Must throw on BOTH hosts: on :cljs a nil alphabet index fed to bit-or is
+  ;; silently 0, which would decode an invalid character as 'A'.
+  (is (thrown? #?(:clj Exception :cljs :default) (mf/base64url-decode "Zg*v")))
+  (is (thrown? #?(:clj Exception :cljs :default) (mf/base64url-decode "Zm9+")))
+  (is (thrown? #?(:clj Exception :cljs :default) (mf/base64url-decode "Zm9/"))))
