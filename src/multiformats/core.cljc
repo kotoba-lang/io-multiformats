@@ -34,10 +34,6 @@
 (def ^:private b58-alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 (def ^:private b58-idx (into {} (map-indexed (fn [i c] [c i]) b58-alphabet)))
 
-(defn- alphabet-char [alphabet i]
-  #?(:clj (.charAt ^String alphabet (int i))
-     :cljs (.charAt alphabet i)))
-
 (defn- ->ints [data] (map #(bit-and (int %) 0xff) (seq data)))
 
 (defn base58btc
@@ -59,7 +55,7 @@
                 [] in)
         nzeros (count (take-while zero? in))]
     (str (apply str (repeat nzeros \1))
-         (apply str (map #(alphabet-char b58-alphabet %) (rseq digits))))))
+         (apply str (map #(nth b58-alphabet %) (rseq digits))))))
 
 (defn base58btc-decode
   "base58btc String → raw bytes (a byte-array on :clj, a vector of ints on
@@ -101,7 +97,7 @@
 ;; ── hashing ──────────────────────────────────────────────────────────────────
 (defn sha256
   "SHA-256 digest bytes. :clj — java.security.MessageDigest. :cljs —
-   @noble/hashes/sha2 (pure JS, sync)."
+   the noble/hashes sha2 implementation (pure JS, sync)."
   [b]
   #?(:clj (.digest (MessageDigest/getInstance "SHA-256") b)
      :cljs (.sha256 noble-sha2 b)))
@@ -135,8 +131,7 @@
          (partition 5 5 nil)
          (map (fn [chunk]
                 (let [padded (concat chunk (repeat (- 5 (count chunk)) 0))]
-                  (alphabet-char b32-alphabet
-                                 (reduce (fn [a bit] (+ (* a 2) bit)) 0 padded)))))
+                  (.charAt b32-alphabet (reduce (fn [a bit] (+ (* a 2) bit)) 0 padded)))))
          (apply str))))
 
 (defn base32-decode [s]
