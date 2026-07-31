@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kotoba-lang/multiformats/actions/workflows/ci.yml/badge.svg)](https://github.com/kotoba-lang/multiformats/actions/workflows/ci.yml)
 
-**base58 · base32 · varint · sha2-256 multihash · CIDv1 — real `.cljc`,
+**base58 · base32 · varint · sha2-256 multihash · CIDv1 · multiaddr — real `.cljc`,
 verified on both the JVM and ClojureScript, babashka-friendly. Compute a
 file's CID without shelling out to `ipfs`.**
 
@@ -99,3 +99,36 @@ the real target toolchain before trusting a "portable" claim.
 ## License
 
 Apache-2.0.
+
+## multiaddr
+
+`multiformats.multiaddr` — self-describing network addresses
+(`/ip4/127.0.0.1/tcp/4001/p2p/QmPeer`). Added because libp2p speaks them and
+this org had none.
+
+```clojure
+(ma/parse "/ip4/127.0.0.1/tcp/04001")   ;=> "/ip4/127.0.0.1/tcp/4001"
+(ma/peer-id "/ip4/1.2.3.4/tcp/80/p2p/QmY…")  ;=> "QmY…"
+(ma/transport "/ip4/1.2.3.4/udp/4001/quic-v1") ;=> :quic
+```
+
+**The binary form is the identity.** `/ip4/127.0.0.1/tcp/4001` is one specific
+octet sequence, and two addresses are the same address when their octets match.
+`equal?` compares octets and `parse` normalizes through them — comparing the
+strings instead makes `/tcp/04001` a different address from `/tcp/4001` and
+lets one peer occupy two routing-table entries.
+
+**A `/p2p/` peer ID round-trips through its multihash**, not its text, for the
+same reason.
+
+**`/unix` consumes the rest of the address**, because a filesystem path
+contains slashes. Parsed one segment at a time, `/unix/tmp/sock` looks like an
+unknown protocol `sock`.
+
+**A flag protocol yields `nil`, not `""`** — an empty string is a value and
+`/quic` has none.
+
+**Varint bytes are masked.** `multiformats.core/varint` returns a host byte
+array whose bytes are signed on the JVM, so 0x91 comes back as -111; without
+the mask the same address encodes differently per platform. There is a test
+against the octet sequence the multiaddr spec documents.
