@@ -81,6 +81,20 @@
 
 ;; ── varint ────────────────────────────────────────────────────────────────
 
+(defn- utf8
+  "String → UTF-8 octets. `(map int (seq s))` is JVM-only thinking: on the JVM
+  `seq` of a string yields Characters and `int` gives the code point, while in
+  ClojureScript it yields one-character *strings* and `int` gives NaN — so
+  every string-valued component (`/dns4/…`, `/unix/…`) encoded as zeros there
+  and decoded back as blanks. Caught by CI, not by the JVM suite."
+  [s]
+  #?(:clj (vec (.getBytes ^String s "UTF-8"))
+     :cljs (vec (.encode (js/TextEncoder.) s))))
+
+(defn- utf8-str [bs]
+  #?(:clj (String. (byte-array (map unchecked-byte bs)) "UTF-8")
+     :cljs (.decode (js/TextDecoder. "utf-8") (js/Uint8Array.from (clj->js (vec bs))))))
+
 (defn- put-varint
   "`multiformats.core/varint` returns a host byte array, whose bytes are
   SIGNED on the JVM — 0x91 comes back as -111. Masking here is what keeps the
@@ -150,8 +164,8 @@
     ;; /p2p carries a peer ID, which is a base58btc multihash in the string form
     ;; and the raw multihash on the wire. Storing the text would make two
     ;; spellings of one peer compare unequal.
-    ("p2p" "ipfs") (vec (mf/base58btc-decode v))
-    (mapv #(bit-and (int %) 0xFF) (seq v))))
+    ("p2p" "ipfs") (mapv #(bit-and % 0xFF) (vec (seq (mf/base58btc-decode v))))
+    (utf8 v)))
 
 (defn- octets->value [nm bs]
   (case nm
@@ -159,7 +173,7 @@
     "ip6" (octets->ip6 bs)
     ("tcp" "udp" "dccp" "sctp") (octets->port bs)
     ("p2p" "ipfs") (mf/base58btc bs)
-    (apply str (map char bs))))
+    (utf8-str bs)))
 
 ;; ── encode ────────────────────────────────────────────────────────────────
 
