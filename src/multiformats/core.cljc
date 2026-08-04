@@ -25,6 +25,7 @@
 ;; a gap.
 (ns multiformats.core
   (:require [clojure.string :as str]
+            [multiformats.base32 :as base32-codec]
             #?(:cljs ["@noble/hashes/sha2.js" :as noble-sha2]))
   #?(:clj (:import (java.security MessageDigest)
                    (java.io ByteArrayOutputStream))))
@@ -102,6 +103,15 @@
   #?(:clj (.digest (MessageDigest/getInstance "SHA-256") b)
      :cljs (.sha256 noble-sha2 b)))
 
+(defn sha384
+  "SHA-384 digest bytes (48 bytes). Same two backends as `sha256`.
+
+  RDFC-1.0 names SHA-384 as an optional canonicalization hash. SHA-384
+  is not a truncation of SHA-512, so both backends compute it directly."
+  [b]
+  #?(:clj (.digest (MessageDigest/getInstance "SHA-384") b)
+     :cljs (.sha384 noble-sha2 b)))
+
 ;; ── unsigned varint (LEB128) ──────────────────────────────────────────────────
 (defn varint [n]
   #?(:clj
@@ -118,49 +128,55 @@
          (recur (unsigned-bit-shift-right v 7)
                 (conj out (bit-or (bit-and v 0x7f) 0x80)))))))
 
-;; ── base32 (RFC 4648 lower, no padding) — the multibase 'b' alphabet ──────────
-;; Fully portable: `.charAt` exists on both java.lang.String and JS strings.
-(def ^:private b32-alphabet "abcdefghijklmnopqrstuvwxyz234567")
-(def ^:private b32-idx (into {} (map-indexed (fn [i c] [c i]) b32-alphabet)))
+;; Stable aliases preserve the existing API. CID parsers that do not hash can
+;; require `multiformats.base32` directly and avoid the SHA/npm dependency.
+(def base32 base32-codec/encode)
+(def base32-decode base32-codec/decode)
 
-(defn base32 [b]
-  (let [bits (mapcat (fn [byte] (let [v (bit-and (int byte) 0xff)]
-                                  (map #(bit-and (bit-shift-right v %) 1) [7 6 5 4 3 2 1 0])))
-                     (seq b))]
-    (->> bits
-         (partition 5 5 nil)
-         (map (fn [chunk]
-                (let [padded (concat chunk (repeat (- 5 (count chunk)) 0))]
-                  (.charAt b32-alphabet (reduce (fn [a bit] (+ (* a 2) bit)) 0 padded)))))
-         (apply str))))
+;; ── base64url, no padding (multibase prefix `u`, RFC 4648 §5) ────────────────
+(def ^:private b64url-alphabet
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+(def ^:private b64url-idx
+  (into {} (map-indexed (fn [i c] [c i]) b64url-alphabet)))
 
-(defn base32-decode [s]
-  (let [out (loop [cs (seq s) buf 0 bits 0 acc []]
-              (if (empty? cs)
+(defn base64url
+  "Bytes to base64url without padding (RFC 4648 §5)."
+  [bytes]
+  (->> (->ints bytes)
+       (partition 3 3 nil)
+       (mapcat
+        (fn [chunk]
+          (let [n (count chunk)
+                [b0 b1 b2] (concat chunk (repeat (- 3 n) 0))
+                v (bit-or (bit-shift-left b0 16) (bit-shift-left b1 8) b2)
+                chars [(bit-and (bit-shift-right v 18) 0x3f)
+                       (bit-and (bit-shift-right v 12) 0x3f)
+                       (bit-and (bit-shift-right v 6) 0x3f)
+                       (bit-and v 0x3f)]]
+            (map #(nth b64url-alphabet %) (take (inc n) chars)))))
+       (apply str)))
+
+(defn base64url-decode
+  "base64url to raw bytes. Padding is tolerated; bad input is rejected."
+  [text]
+  (let [text (str/replace text #"=+$" "")
+        out (loop [chars (seq text) buffer 0 bit-count 0 acc []]
+              (if (empty? chars)
                 acc
-                (let [ch (first cs)
-                      ;; `b32-idx` returns nil for a character outside the
-                      ;; alphabet -- `(int nil)` throws a NullPointerException
-                      ;; on :clj (fails closed), but on :cljs `int` compiles
-                      ;; through JS's `|0` coercion, where `null|0` and
-                      ;; `undefined|0` are BOTH silently 0 (confirmed via a
-                      ;; real compiled shadow-cljs build, not just reasoned
-                      ;; about) -- so an invalid character used to silently
-                      ;; decode as if it were 'a' (alphabet index 0) on
-                      ;; :cljs instead of raising, the same platform-
-                      ;; inconsistent "fails closed on :clj, silently wrong
-                      ;; on :cljs" bug class already found and fixed in this
-                      ;; ecosystem's kotoba-lang/json (decode's number
-                      ;; parsing) and this repo's own unhex.
-                      idx (or (b32-idx ch)
-                              (throw (ex-info "multiformats: invalid base32 character" {:char ch})))
-                      buf (bit-or (bit-shift-left buf 5) idx)
-                      bits (+ bits 5)]
-                  (if (>= bits 8)
-                    (recur (rest cs) buf (- bits 8)
-                           (conj acc (bit-and (unsigned-bit-shift-right buf (- bits 8)) 0xff)))
-                    (recur (rest cs) buf bits acc)))))]
-    #?(:clj (byte-array out) :cljs (vec out))))
+                (let [ch (first chars)
+                      idx (or (b64url-idx ch)
+                              (throw (ex-info "multiformats: invalid base64url character"
+                                              {:char ch})))
+                      buffer (bit-or (bit-shift-left buffer 6) idx)
+                      bit-count (+ bit-count 6)]
+                  (if (>= bit-count 8)
+                    (recur (rest chars) buffer (- bit-count 8)
+                           (conj acc
+                                 (bit-and
+                                  (unsigned-bit-shift-right buffer (- bit-count 8))
+                                  0xff)))
+                    (recur (rest chars) buffer bit-count acc)))))]
+    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out))))
 
 ;; ── multihash (sha2-256 = 0x12, length 0x20) ──────────────────────────────────
 ;; Returns an array-like on both platforms (byte-array / Uint8Array), NOT a
@@ -216,7 +232,7 @@
 
 ;; ── file helper (single-block raw CID) — genuinely :clj-only: file I/O differs
 ;; by platform, this isn't a gap the way sha256/CID assembly were. ────────────
-(def ^:private single-block-limit 262144) ; ipfs default chunker = 256 KiB
+(def ^:const single-block-limit 262144) ; ipfs default chunker = 256 KiB
 
 #?(:clj
    (defn cid-of-file
