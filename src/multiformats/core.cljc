@@ -34,10 +34,6 @@
 (def ^:private b58-alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 (def ^:private b58-idx (into {} (map-indexed (fn [i c] [c i]) b58-alphabet)))
 
-(defn- alphabet-char [alphabet i]
-  #?(:clj (.charAt ^String alphabet (int i))
-     :cljs (.charAt alphabet i)))
-
 (defn- ->ints [data] (map #(bit-and (int %) 0xff) (seq data)))
 
 (defn base58btc
@@ -59,7 +55,7 @@
                 [] in)
         nzeros (count (take-while zero? in))]
     (str (apply str (repeat nzeros \1))
-         (apply str (map #(alphabet-char b58-alphabet %) (rseq digits))))))
+         (apply str (map #(nth b58-alphabet %) (rseq digits))))))
 
 (defn base58btc-decode
   "base58btc String → raw bytes (a byte-array on :clj, a vector of ints on
@@ -101,25 +97,10 @@
 ;; ── hashing ──────────────────────────────────────────────────────────────────
 (defn sha256
   "SHA-256 digest bytes. :clj — java.security.MessageDigest. :cljs —
-   @noble/hashes/sha2 (pure JS, sync)."
+   the noble/hashes sha2 implementation (pure JS, sync)."
   [b]
   #?(:clj (.digest (MessageDigest/getInstance "SHA-256") b)
      :cljs (.sha256 noble-sha2 b)))
-
-(defn sha384
-  "SHA-384 digest bytes (48 bytes). Same two backends as `sha256`.
-
-   Present because RDFC-1.0 (RDF Dataset Canonicalization) names SHA-384 as an
-   OPTIONAL alternative to its default SHA-256, and its official test suite covers
-   that path — so a canonicalizer that supports the parameter needs this here rather
-   than reaching for a second hash library.
-
-   NOTE SHA-384 is not simply a truncation of SHA-512: it is SHA-512 with different
-   initial state values, so `(take 48 (sha512 x))` is a DIFFERENT digest. Both
-   backends below compute the real thing."
-  [b]
-  #?(:clj (.digest (MessageDigest/getInstance "SHA-384") b)
-     :cljs (.sha384 noble-sha2 b)))
 
 ;; ── unsigned varint (LEB128) ──────────────────────────────────────────────────
 (defn varint [n]
@@ -150,8 +131,7 @@
          (partition 5 5 nil)
          (map (fn [chunk]
                 (let [padded (concat chunk (repeat (- 5 (count chunk)) 0))]
-                  (alphabet-char b32-alphabet
-                                 (reduce (fn [a bit] (+ (* a 2) bit)) 0 padded)))))
+                  (.charAt b32-alphabet (reduce (fn [a bit] (+ (* a 2) bit)) 0 padded)))))
          (apply str))))
 
 (defn base32-decode [s]
@@ -181,65 +161,6 @@
                            (conj acc (bit-and (unsigned-bit-shift-right buf (- bits 8)) 0xff)))
                     (recur (rest cs) buf bits acc)))))]
     #?(:clj (byte-array out) :cljs (vec out))))
-
-;; ── base64url, no padding (multibase prefix `u`, RFC 4648 §5) ─────────────────
-;; Added because base64url is a multibase encoding and this is where multibase
-;; lives, but there was no canonical implementation of it in the workspace — so
-;; every consumer that needed one grew its own (com-gmail/mime, com-teams-bot/jwt,
-;; envelope/seal, authentication/webcrypto, engi/crypto, and cacao all carry a
-;; private variant, several differing on padding). W3C vc-bitstring-status-list
-;; needs it for `encodedList`, which is signed, so a variant that disagrees about
-;; padding produces a credential nobody else can validate.
-;;
-;; No padding: multibase omits it, and RFC 4648 §3.2 makes it optional when the
-;; length is otherwise known. `base64url-decode` accepts trailing '=' anyway, so
-;; a padded value from one of the older private encoders still reads.
-(def ^:private b64url-alphabet
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-(def ^:private b64url-idx (into {} (map-indexed (fn [i c] [c i]) b64url-alphabet)))
-
-(defn base64url
-  "Bytes → base64url String with NO padding (RFC 4648 §5)."
-  [b]
-  (->> (->ints b)
-       (partition 3 3 nil)
-       (mapcat
-        (fn [chunk]
-          (let [n (count chunk)
-                [b0 b1 b2] (concat chunk (repeat (- 3 n) 0))
-                v (bit-or (bit-shift-left b0 16) (bit-shift-left b1 8) b2)
-                cs [(bit-and (bit-shift-right v 18) 0x3f)
-                    (bit-and (bit-shift-right v 12) 0x3f)
-                    (bit-and (bit-shift-right v 6) 0x3f)
-                    (bit-and v 0x3f)]]
-            ;; 3 bytes -> 4 chars, 2 -> 3, 1 -> 2. Emitting the padding chars
-            ;; instead would change the signed bytes of a multibase value.
-            (map #(alphabet-char b64url-alphabet %) (take (inc n) cs)))))
-       (apply str)))
-
-(defn base64url-decode
-  "base64url String → raw bytes (byte-array on :clj, vector of ints on :cljs).
-   Trailing '=' padding is tolerated. An out-of-alphabet character throws rather
-   than decoding as index 0 — `b64url-idx` returns nil for it, and on :cljs a nil
-   fed to `bit-or`/`bit-shift-left` is silently 0 rather than an error, the same
-   platform-inconsistent bug class already fixed in this namespace's unhex,
-   base32-decode and base58btc-decode."
-  [s]
-  (let [s (str/replace s #"=+$" "")
-        out (loop [cs (seq s) buf 0 bits 0 acc []]
-              (if (empty? cs)
-                acc
-                (let [ch (first cs)
-                      idx (or (b64url-idx ch)
-                              (throw (ex-info "multiformats: invalid base64url character"
-                                              {:char ch})))
-                      buf (bit-or (bit-shift-left buf 6) idx)
-                      bits (+ bits 6)]
-                  (if (>= bits 8)
-                    (recur (rest cs) buf (- bits 8)
-                           (conj acc (bit-and (unsigned-bit-shift-right buf (- bits 8)) 0xff)))
-                    (recur (rest cs) buf bits acc)))))]
-    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out))))
 
 ;; ── multihash (sha2-256 = 0x12, length 0x20) ──────────────────────────────────
 ;; Returns an array-like on both platforms (byte-array / Uint8Array), NOT a
