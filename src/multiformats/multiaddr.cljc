@@ -103,16 +103,35 @@
   (mapv #(bit-and % 0xFF) (vec (seq (mf/varint n)))))
 
 (defn- read-varint
-  "Returns `[value next-index]`."
+  "Returns `[value next-index]`.
+
+  A multiaddr arrives from a peer, so every refusal here is reachable by
+  anyone. Two of them were not doing what they say:
+
+  **The multiplier is capped.** Left to grow it reaches 128^9 = 2^63 on the
+  ninth byte and throws `ArithmeticException: long overflow` on the JVM --
+  a host-level crash, from which the guard below never runs -- while
+  ClojureScript's doubles sail past and report the intended
+  `varint too long in multiaddr`. Measured 2026-08-17: ten 0x80 octets, a
+  legal thing for a hostile peer to send, produced those two different
+  outcomes from the same input. Capping is safe: past `mf/max-exact` any
+  nonzero byte trips the range check below regardless of the exact multiplier.
+
+  **The value is bounded.** ClojureScript stops representing integers exactly
+  at 2^53, so without this a large varint would decode to a quietly wrong
+  number there and an exact one on the JVM."
   [bs i]
   (loop [i i mult 1 acc 0 n 0]
     (when (>= i (count bs)) (throw (ex-info "truncated varint in multiaddr" {:at i})))
     (when (>= n 9) (throw (ex-info "varint too long in multiaddr" {:at i})))
     (let [b (bit-and (nth bs i) 0xFF)
           acc (+ acc (* mult (bit-and b 0x7F)))]
+      (when (> acc mf/max-exact)
+        (throw (ex-info "varint out of range in multiaddr"
+                        {:at i :max-exact mf/max-exact})))
       (if (zero? (bit-and b 0x80))
         [acc (inc i)]
-        (recur (inc i) (* mult 128) acc (inc n))))))
+        (recur (inc i) (if (> mult mf/max-exact) mult (* mult 128)) acc (inc n))))))
 
 ;; ── values ────────────────────────────────────────────────────────────────
 

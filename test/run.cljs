@@ -1,0 +1,35 @@
+(ns run
+  "The suite under ClojureScript.
+
+  This library is compiled into `kotobase-protocols-worker`, which serves
+  s3 / atproto / pinning / sparql / gremlin / graphql on kotobase.net, so
+  ClojureScript is where its code executes. The repo's own cljs path was
+  `shadow-cljs compile test` -- a JVM build, which the murakumo fleet cannot
+  run as an `:nbb-test` gate, so in practice only the JVM half was checked.
+
+  Measured 2026-08-17, that mattered in both directions at once:
+
+    - `multiformats.core/varint` built its ClojureScript branch on
+      `unsigned-bit-shift-right`, which is int32 there, so 2^32 encoded to
+      [128 0] -- a well-formed varint that decodes to zero -- while the JVM
+      emitted the correct five octets. Nothing errored.
+    - `multiaddr/read-varint` let its multiplier reach 128^9 = 2^63, so ten
+      0x80 octets from a peer threw `ArithmeticException: long overflow` on
+      the JVM, where the library's own \"varint too long\" guard never ran,
+      while ClojureScript reported the intended refusal.
+
+  One defect per host. A gate on either runtime alone sees exactly half.
+
+      npx nbb --classpath src:test test/run.cljs"
+  (:require [cljs.test :as t]
+            [multiformats.base32-test]
+            [multiformats.core-test]
+            [multiformats.multiaddr-test]))
+
+(defmethod t/report [::t/default :end-run-tests] [m]
+  (when-not (t/successful? m)
+    (js/process.exit 1)))
+
+(t/run-tests 'multiformats.base32-test
+             'multiformats.core-test
+             'multiformats.multiaddr-test)
