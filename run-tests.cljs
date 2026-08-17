@@ -1,4 +1,4 @@
-(ns run
+(ns run-tests
   "The suite under ClojureScript.
 
   This library is compiled into `kotobase-protocols-worker`, which serves
@@ -20,7 +20,7 @@
 
   One defect per host. A gate on either runtime alone sees exactly half.
 
-      npx nbb --classpath src:test test/run.cljs"
+      npx nbb run-tests.cljs"
   (:require [cljs.test :as t]
             [multiformats.base32-test]
             [multiformats.core-test]
