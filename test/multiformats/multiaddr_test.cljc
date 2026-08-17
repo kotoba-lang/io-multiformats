@@ -2,6 +2,30 @@
   (:require [clojure.test :refer [deftest is testing]]
             [multiformats.multiaddr :as ma]))
 
+;; ── what a peer can send ──────────────────────────────────────────────────
+
+(deftest a-hostile-varint-is-refused-the-same-way-on-both-hosts
+  ;; A multiaddr arrives from a peer, so this input is reachable by anyone.
+  ;;
+  ;; Measured 2026-08-17, before the multiplier was capped: ten 0x80 octets
+  ;; threw `ArithmeticException: long overflow` on the JVM -- the multiplier
+  ;; reached 128^9 = 2^63 before the "too long" guard could run -- while
+  ;; ClojureScript's doubles sailed past and reported the intended refusal.
+  ;; Same octets, two different failures, and on the JVM the library's own
+  ;; guard never executed.
+  ;;
+  ;; The assertion is `ex-info` specifically. `thrown?` with a host exception
+  ;; type would have passed on both hosts throughout, which is how this sat
+  ;; here unnoticed.
+  (doseq [[label bs] [["ten continuation octets" (vec (repeat 10 0x80))]
+                      ["nine continuation then a payload" (conj (vec (repeat 9 0x80)) 0x01)]]]
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (ma/->string bs))
+        label))
+  (testing "a truncated varint is still its own refusal"
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (ma/->string [0x80])))))
+
 ;; ── the canonical binary form ─────────────────────────────────────────────
 
 (deftest the-spec-example-encodes-to-the-documented-octets

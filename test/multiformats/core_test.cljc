@@ -3,8 +3,8 @@
    output (these vectors were minted by real go-ipfs/kubo) plus encode/decode
    round-trips. No network, no ipfs CLI at test time."
   (:require [clojure.string :as str]
-            #?(:clj [clojure.test :refer [deftest is]]
-               :cljs [cljs.test :refer [deftest is] :include-macros true])
+            #?(:clj [clojure.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [multiformats.core :as mf]))
 
 (defn- utf8-bytes [s]
@@ -69,6 +69,26 @@
   (is (= 32 (alength (mf/sha256 (empty-bytes))))))
 
 ;; ── varint ────────────────────────────────────────────────────────────────────
+
+(deftest varint-agrees-on-both-hosts-past-2-to-the-32
+  ;; The octets, not a numeric round trip: the JVM branch and the ClojureScript
+  ;; branch are different code, so what has to match is the bytes they emit.
+  ;;
+  ;; Measured 2026-08-17, with the ClojureScript branch built on
+  ;; `unsigned-bit-shift-right` (int32 there): 2^32 encoded to [128 0] instead
+  ;; of [128 128 128 128 16]. Not an error -- a well-formed varint that decodes
+  ;; to zero. Every multicodec and multiaddr code in use is far below this, so
+  ;; nothing was reaching it; that is the same thing dev-protobuf's range note
+  ;; said right before its example turned out to be the counterexample.
+  (is (= [128 128 128 128 16] (mapv #(bit-and % 0xff) (mf/varint 4294967296))))
+  (is (= [128 128 128 128 128 1] (mapv #(bit-and % 0xff) (mf/varint 34359738368))))
+  (testing "and the edge is refused rather than rounded"
+    (is (= 8 (count (mf/varint mf/max-exact))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (mf/varint (inc mf/max-exact))))
+    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+                 (mf/varint -1)))))
+
 (deftest varint-unsigned
   (is (= [0x00] (map #(bit-and % 0xff) (mf/varint 0))))
   (is (= [0x55] (map #(bit-and % 0xff) (mf/varint 0x55))))       ; raw codec, single byte

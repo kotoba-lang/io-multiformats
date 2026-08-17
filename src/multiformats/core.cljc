@@ -113,19 +113,50 @@
      :cljs (.sha384 noble-sha2 b)))
 
 ;; ── unsigned varint (LEB128) ──────────────────────────────────────────────────
-(defn varint [n]
+
+(def max-exact
+  "Largest integer both hosts represent exactly, 2^53-1.
+
+  The same constant `proto.wire/max-exact` and `protobuf.wire/max-exact` name.
+  Three libraries in this workspace encode the same base-128 varint, and they
+  have to agree about which values exist -- when they did not, the same octets
+  meant different numbers depending on which one read them."
+  9007199254740991)
+
+(defn varint
+  "Unsigned base-128 varint (LEB128).
+
+  Arithmetic rather than shifts. Measured 2026-08-17, the ClojureScript branch
+  used `unsigned-bit-shift-right`, which operates on int32 there, so every
+  value at or above 2^32 produced DIFFERENT OCTETS from the JVM:
+
+      2^32  ->  JVM [128 128 128 128 16]   CLJS [128 0]
+      2^35  ->  JVM [128 128 128 128 128 1] CLJS [128 0]
+
+  Not an error either way. `[128 0]` is a well-formed varint that decodes to
+  zero, so a CID or multiaddr built in a Worker would have been accepted
+  everywhere and meant something else.
+
+  Nothing reaches that today -- multicodec and multiaddr protocol codes are
+  all small -- so this was latent rather than live. It is fixed anyway, for the
+  reason `dev-protobuf` learned the hard way: its range note said the values it
+  encoded stayed far inside the exact range, and the example it gave was the
+  counterexample."
+  [n]
+  (when (or (neg? n) (> n max-exact))
+    (throw (ex-info "varint out of range" {:value n :max-exact max-exact})))
   #?(:clj
      (let [out (ByteArrayOutputStream.)]
        (loop [v (long n)]
          (if (< v 0x80)
            (do (.write out (int v)) (.toByteArray out))
            (do (.write out (int (bit-or (bit-and v 0x7f) 0x80)))
-               (recur (unsigned-bit-shift-right v 7))))))
+               (recur (quot v 128))))))
      :cljs
      (loop [v n out []]
        (if (< v 0x80)
          (conj out v)
-         (recur (unsigned-bit-shift-right v 7)
+         (recur (quot v 128)
                 (conj out (bit-or (bit-and v 0x7f) 0x80)))))))
 
 ;; Stable aliases preserve the existing API. CID parsers that do not hash can
