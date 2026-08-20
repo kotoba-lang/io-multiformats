@@ -212,3 +212,87 @@
   (is (thrown? #?(:clj Exception :cljs :default) (mf/base64url-decode "Zg*v")))
   (is (thrown? #?(:clj Exception :cljs :default) (mf/base64url-decode "Zm9+")))
   (is (thrown? #?(:clj Exception :cljs :default) (mf/base64url-decode "Zm9/"))))
+
+;; ── varint-decode ────────────────────────────────────────────────────────────
+
+(deftest varint-decode-round-trips-the-encoder
+  (testing "every value `varint` will encode, `varint-decode` reads back"
+    (doseq [n [0 1 127 128 255 256 16383 16384
+               0x55 0x70 0x71                    ; the multicodecs in use here
+               65535 1000000
+               4294967296                        ; 2^32 — where the int32 defect showed
+               34359738368                       ; 2^35
+               9007199254740991]]                ; max-exact
+      (is (= {:value n :next (count (vec (mf/varint n)))}
+             (mf/varint-decode (vec (mf/varint n)) 0))
+          (str "round trip of " n)))))
+
+(deftest varint-decode-is-exact-above-2-pow-32
+  (testing "the vector that decoded as 0 on ClojureScript and 4294967296 on the JVM"
+    ;; `ipld.core`'s private read-varint accumulated with bit-shift-left, which
+    ;; is int32 on cljs; 1 << 35 became 1 << 3. Measured 2026-08-20.
+    (is (= {:value 4294967296 :next 5}
+           (mf/varint-decode [128 128 128 128 16] 0)))
+    (is (= {:value 34359738368 :next 6}
+           (mf/varint-decode [128 128 128 128 128 1] 0)))))
+
+(deftest varint-decode-reads-at-an-offset
+  (is (= {:value 0x71 :next 2} (mf/varint-decode [0x01 0x71 0xde 0xad] 1))))
+
+(deftest varint-decode-distinguishes-its-failures
+  (testing "three different facts about the input, three different answers"
+    (is (= {:error :incomplete} (mf/varint-decode [] 0))
+        "no bytes at all")
+    (is (= {:error :incomplete} (mf/varint-decode [0x80] 0))
+        "continuation bit set and then the bytes run out")
+    (is (= {:error :incomplete} (mf/varint-decode [0x01] 5))
+        "offset past the end")
+    (is (= {:error :unterminated} (mf/varint-decode (vec (repeat 12 0x80)) 0))
+        "never terminates — bounded rather than spinning")
+    (is (= {:error :not-exact}
+           (mf/varint-decode [0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff 0x7f] 0))
+        "decodes past max-exact, where a cljs number stops being exact")))
+
+;; ── CID disassembly ──────────────────────────────────────────────────────────
+
+(deftest cid->multihash-is-the-multihash-that-built-it
+  (let [b (utf8-bytes "hello incidence")]
+    (is (= (vec (mf/multihash-sha256 b))
+           (vec (mf/cid->multihash (mf/cidv1-raw b)))))
+    (is (= (vec (mf/multihash-sha256 b))
+           (vec (mf/cid->multihash (mf/cidv1-dag-cbor b)))))))
+
+(deftest two-codecs-one-multihash
+  (testing "the whole reason a multihash is not a CID"
+    ;; IPNI keys provider records by digest. The same bytes addressed as raw
+    ;; and as dag-cbor are two CIDs and one location question.
+    (let [b (utf8-bytes "same bytes, two codecs")
+          raw (mf/cidv1-raw b)
+          cbor (mf/cidv1-dag-cbor b)]
+      (is (not= raw cbor) "different CIDs")
+      (is (= (vec (mf/cid->multihash raw)) (vec (mf/cid->multihash cbor)))
+          "one multihash"))))
+
+(deftest cid->parts-reports-what-the-cid-declares
+  (let [b (utf8-bytes "parts")]
+    (is (= {:version 1 :codec mf/codec-raw} (dissoc (mf/cid->parts (mf/cidv1-raw b))
+                                                    :multihash)))
+    (is (= {:version 1 :codec mf/codec-dag-cbor}
+           (dissoc (mf/cid->parts (mf/cidv1-dag-cbor b)) :multihash)))))
+
+(deftest cid->parts-refuses-what-is-not-a-cidv1
+  (is (= {:error :not-base32-cid} (mf/cid->parts "Qmnotacidv1"))
+      "a v0 CID does not start with the base32 multibase prefix")
+  (is (= {:error :not-base32-cid} (mf/cid->parts "")))
+  (is (nil? (mf/cid->multihash "Qmnotacidv1"))
+      "the convenience accessor yields nil rather than a half-parsed answer"))
+
+(deftest cid->multihash-hands-back-an-array-not-a-cljs-vector
+  (testing "aget/alength return nil/0 on a PersistentVector instead of throwing"
+    (let [mh (mf/cid->multihash (mf/cidv1-raw (utf8-bytes "array shape")))]
+      (is (= 34 #?(:clj (alength ^bytes mh) :cljs (.-length mh)))
+          "2 header bytes + 32 digest bytes")
+      (is (= 0x12 (bit-and #?(:clj (aget ^bytes mh 0) :cljs (aget mh 0)) 0xff))
+          "sha2-256")
+      (is (= 0x20 (bit-and #?(:clj (aget ^bytes mh 1) :cljs (aget mh 1)) 0xff))
+          "32 bytes long"))))
