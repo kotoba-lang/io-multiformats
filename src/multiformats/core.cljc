@@ -159,6 +159,56 @@
          (recur (quot v 128)
                 (conj out (bit-or (bit-and v 0x7f) 0x80)))))))
 
+(defn varint-decode
+  "Read one unsigned base-128 varint (LEB128) at `offset` of a byte-indexable
+  `bytes`. Returns `{:value n :next i}`, or `{:error kw}` — never a bare nil.
+
+  The inverse of `varint`, and it is here rather than in a caller because a
+  private copy already diverged from it. `ipld.core` carried a `defn-`
+  `read-varint` whose accumulator was `(bit-shift-left (bit-and b 0x7f) shift)`.
+  That is the SAME int32 defect `varint` itself was fixed for on 2026-08-17,
+  reflected into the decoder and left there — measured 2026-08-20, the varint
+  of 2^32 (`[128 128 128 128 16]`) decodes as:
+
+      JVM   4294967296
+      CLJS  0
+
+  Not an error either way, so a header carrying a large multicodec would have
+  been accepted on both runtimes and meant something else on one. Nothing
+  reaches it today (CID version 1 and codecs 0x55/0x70/0x71 are all one group),
+  which is exactly why it survived: the encoder's fix was reviewed, the
+  decoder was in another repo and not public, so nobody compared them.
+
+  Arithmetic, not shifts, for that reason.
+
+  **The error cases are distinct on purpose.** A truncated header, a header
+  that never terminates, and a value too large to be exact are three different
+  facts about the input, and a caller that sees `nil` for all three cannot
+  report which one it got. `:incomplete` means the bytes ran out mid-varint;
+  `:unterminated` means the continuation bit stayed set past the widest value
+  this codec admits; `:not-exact` means the value decoded past `max-exact`,
+  where a ClojureScript number stops being able to hold it exactly — refusing
+  is the only answer that means the same thing on both runtimes."
+  [bytes offset]
+  (let [n (count bytes)]
+    (loop [i offset mult 1 value 0 groups 0]
+      (cond
+        (>= i n) {:error :incomplete}
+        :else
+        (let [b (bit-and (long (nth bytes i)) 0xff)
+              value (+ value (* (bit-and b 0x7f) mult))]
+          (cond
+            (> value max-exact) {:error :not-exact}
+            (zero? (bit-and b 0x80)) {:value value :next (inc i)}
+            ;; max-exact is 53 bits = 8 groups, so group index 7 is the last
+            ;; legitimate one and `mult` never grows past 128^7. Bounding here
+            ;; rather than after the multiply is not a style choice: 128^9
+            ;; is Long.MAX_VALUE + 1, so a guard placed one step later throws
+            ;; `long overflow` on the JVM instead of reporting the malformed
+            ;; input. Found by this function's own :unterminated test.
+            (>= groups 7) {:error :unterminated}
+            :else (recur (inc i) (* mult 128) value (inc groups))))))))
+
 ;; Stable aliases preserve the existing API. CID parsers that do not hash can
 ;; require `multiformats.base32` directly and avoid the SHA/npm dependency.
 (def base32 base32-codec/encode)
@@ -260,6 +310,68 @@
   (when-not (str/starts-with? cid "b")
     (throw (ex-info "expected base32 'b' multibase CID" {:cid cid})))
   (base32-decode (subs cid 1)))
+
+;; ── CID disassembly ──────────────────────────────────────────────────────────
+;; `cidv1` assembles (version, codec, multihash); until 2026-08-20 nothing took
+;; one apart. `ipld.core/cid-codec` read the codec and stopped there, so the
+;; multihash — the part IPNI actually indexes, and the part that is the SAME
+;; for two CIDs of one content under different codecs — could not be obtained
+;; from a CID anywhere in this workspace.
+;;
+;; That distinction is the point. A CID answers *what is this*; a multihash
+;; answers *where is it*, because a provider record is keyed by digest and does
+;; not care whether the caller wants the bytes as raw or as dag-pb. Deriving
+;; one direction is total (`cid->multihash`); the other is not a function, and
+;; there is deliberately no `multihash->cid`.
+
+(defn- byte-view
+  "Array-like on both runtimes, never a ClojureScript vector.
+
+  `cid->bytes` hands back a JVM byte-array but a cljs PersistentVector, and
+  this namespace's own multihash note records why that asymmetry bites:
+  `aget`/`alength` return nil/0 on a vector instead of throwing. Anything
+  shaped like a multihash leaves here shaped like `multihash-sha256`'s output."
+  [xs]
+  #?(:clj (byte-array (map unchecked-byte xs))
+     :cljs (let [out (js/Uint8Array. (count xs))]
+             (doseq [[i b] (map-indexed vector xs)] (aset out i (bit-and b 0xff)))
+             out)))
+
+(defn cid->parts
+  "`{:version :codec :multihash}` of a base32 CIDv1, or `{:error kw}`.
+
+  `:multihash` is array-like (see `byte-view`) and is the remainder of the
+  decoded CID after the two varint headers — it is NOT re-validated as a
+  well-formed multihash, because this function's job is to say what the CID
+  declares, not to judge it. `:error` is `:not-cidv1` for a v0 `Qm…` or any
+  other version, otherwise whatever `varint-decode` reported."
+  [cid]
+  (let [bytes (try (vec (cid->bytes cid))
+                   (catch #?(:clj Exception :cljs :default) _ nil))]
+    (if (nil? bytes)
+      {:error :not-base32-cid}
+      (let [v (varint-decode bytes 0)]
+        (cond
+          (:error v) v
+          (not= 1 (:value v)) {:error :not-cidv1}
+          :else
+          (let [c (varint-decode bytes (:next v))]
+            (if (:error c)
+              c
+              {:version 1
+               :codec (:value c)
+               :multihash (byte-view (subvec bytes (:next c)))})))))))
+
+(defn cid->multihash
+  "The multihash bytes a CIDv1 carries, or nil.
+
+  Total in the direction that is a function: every CIDv1 names exactly one
+  multihash, and two CIDs differing only in codec name the same one. The
+  reverse is not a function — a multihash does not determine a codec — so a
+  caller holding only this cannot reconstruct the CID it came from, and is
+  not meant to."
+  [cid]
+  (:multihash (cid->parts cid)))
 
 ;; ── file helper (single-block raw CID) — genuinely :clj-only: file I/O differs
 ;; by platform, this isn't a gap the way sha256/CID assembly were. ────────────
