@@ -6,9 +6,7 @@
     "task": "nbb scripts/run-task.cljs",
     "tasks": "nbb scripts/run-task.cljs"
   },
-  "dependencies": {
-    "@noble/hashes": "2.0.1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "shadow-cljs": "^2.28.0"
   }

@@ -18,9 +18,8 @@ on both platforms.
 
 This used to be JVM-only (`java.security.MessageDigest`) despite living in a
 `.cljc`-named file — a documented, known gap every downstream repo in this
-ecosystem carried. `sha256` now uses `@noble/hashes` on `:cljs` (pure JS,
-sync, no native deps — the real npm runtime dependency this adds; everything
-else stays dependency-free). `cid-of-file` stays `:clj`-only — that's file
+ecosystem carried. `sha256` / `sha384` now use `kotoba-lang/org-nist-sha2` on
+both hosts (pure `.cljc`, no npm). `cid-of-file` stays `:clj`-only — that's file
 I/O, not a gap.
 
 Two correctness pitfalls found while verifying this under the real

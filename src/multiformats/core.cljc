@@ -16,19 +16,17 @@
 ;;
 ;; PORTABLE (.cljc, real on both platforms — this is the fix for the honesty note
 ;; every downstream repo in this ecosystem carried: "multiformats/dag-cbor are
-;; today JVM-only despite living in .cljc-named files"). `sha256` is the SHA-256
-;; part of `@noble/hashes` on :cljs (pure JS, sync, no native deps — the same
-;; choice `kotoba-lang/mst` and app-aozora's `kotobase.cid.cljc` already made) and
-;; `java.security.MessageDigest` on :clj. Everything else (varint, base32, CID
-;; assembly) is either fully shared bit-arithmetic or a small per-platform byte
-;; construction. Only `cid-of-file` stays :clj-only — that's genuine file I/O, not
-;; a gap.
+;; today JVM-only despite living in .cljc-named files"). `sha256` / `sha384` use
+;; `kotoba-lang/org-nist-sha2` on both hosts (pure `.cljc`, no npm). Everything
+;; else (varint, base32, CID assembly) is either fully shared bit-arithmetic or
+;; a small per-platform byte construction. Only `cid-of-file` stays :clj-only —
+;; that's genuine file I/O, not a gap.
 (ns multiformats.core
   (:require [clojure.string :as str]
             [multiformats.base32 :as base32-codec]
-            #?(:cljs ["@noble/hashes/sha2.js" :as noble-sha2]))
-  #?(:clj (:import (java.security MessageDigest)
-                   (java.io ByteArrayOutputStream))))
+            [sha2.core :as sha2]
+            [sha2.sha512 :as sha512])
+  #?(:clj (:import (java.io ByteArrayOutputStream))))
 
 ;; ── base58btc — base-256 ↔ base-58 by integer division, no BigInteger, so it
 ;; runs in the browser too (did:key 'z' multibase). ──────────────────────────
@@ -96,21 +94,25 @@
     #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out))))
 
 ;; ── hashing ──────────────────────────────────────────────────────────────────
+(defn- byte-seq [b]
+  (mapv #(bit-and (int %) 0xff) b))
+
+(defn- digest-bytes [digest]
+  #?(:clj (byte-array (map unchecked-byte digest))
+     :cljs (js/Uint8Array.from (clj->js digest))))
+
 (defn sha256
-  "SHA-256 digest bytes. :clj — java.security.MessageDigest. :cljs —
-   the noble/hashes sha2 implementation (pure JS, sync)."
+  "SHA-256 digest bytes. Both hosts use `kotoba-lang/org-nist-sha2`."
   [b]
-  #?(:clj (.digest (MessageDigest/getInstance "SHA-256") b)
-     :cljs (.sha256 noble-sha2 b)))
+  (digest-bytes (sha2/sha256 (byte-seq b))))
 
 (defn sha384
-  "SHA-384 digest bytes (48 bytes). Same two backends as `sha256`.
+  "SHA-384 digest bytes (48 bytes). Same backend as `sha256`.
 
   RDFC-1.0 names SHA-384 as an optional canonicalization hash. SHA-384
   is not a truncation of SHA-512, so both backends compute it directly."
   [b]
-  #?(:clj (.digest (MessageDigest/getInstance "SHA-384") b)
-     :cljs (.sha384 noble-sha2 b)))
+  (digest-bytes (sha512/sha384 (byte-seq b))))
 
 ;; ── unsigned varint (LEB128) ──────────────────────────────────────────────────
 
