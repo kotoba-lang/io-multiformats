@@ -7,3 +7,4 @@ node_modules/
 out/
 .shadow-cljs/
 package-lock.json
+node_modules
