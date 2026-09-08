@@ -101,10 +101,87 @@
   #?(:clj (byte-array (map unchecked-byte digest))
      :cljs (js/Uint8Array.from (clj->js digest))))
 
-(defn sha256
-  "SHA-256 digest bytes. Both hosts use `kotoba-lang/org-nist-sha2`."
+(defn portable-sha256
+  "SHA-256 via `kotoba-lang/org-nist-sha2`. Available on every host, and the
+  answer this library gives when nothing faster has been installed."
   [b]
   (digest-bytes (sha2/sha256 (byte-seq b))))
+
+;; ── the digest seam ──────────────────────────────────────────────────────────
+;;
+;; WHY. The portable digest is ~500x slower than the host's, and it is on a
+;; path that runs per block. Measured 2026-09-08 with compiled ClojureScript on
+;; node (load 29):
+;;
+;;      4,795 bytes   portable 1.39 ms   node:crypto 0.0036 ms   382x
+;;    384,843 bytes   portable  117 ms   node:crypto 0.17   ms   700x
+;;
+;; and the cost is the compression loop, not the conversion: `vec(array-seq)`
+;; is 6 ms of the 117 and the digest over the vector is 90. So accepting typed
+;; arrays without converting would buy about a fifth, and this buys the rest.
+;;
+;; It reaches callers. `ipld.core/get-verified-block` re-derives a CID for
+;; every block a traversal touches, so `ipfs.kotobase.net`'s selector surface
+;; paid it per block per restart. Measured live the same day on one 384,843-byte
+;; leaf: ~0.45 s through the route that verifies with `crypto.subtle`, ~1.4-2.0 s
+;; through the route that verifies here.
+;;
+;; WHY A SEAM AND NOT A REQUIRE. A synchronous host digest exists on the JVM
+;; (`MessageDigest`) and on Node/workerd (`node:crypto`), and NOT in a browser:
+;; WebCrypto's `digest` is async and every caller above this line is sync. So
+;; the JVM takes it unconditionally and ClojureScript is given a way to install
+;; one, rather than this namespace requiring `node:crypto` and breaking every
+;; browser build that has never needed it.
+;;
+;; WHAT AN INSTALLER MUST NOT DO is install a different function.
+;; `install-sha256!` proves the candidate against the portable implementation
+;; on a fixed corpus before it accepts it, and REFUSES rather than returning
+;; false -- a caller that ignored a false would be running an unverified digest
+;; under a name that promises SHA-256.
+
+#?(:cljs (defonce ^:private sha256-impl (atom portable-sha256)))
+
+(def ^:private install-corpus
+  "Empty, one byte, a block boundary either side of 64, and a two-block
+   message. The boundaries are where a wrong implementation is wrong: padding
+   is what `pad` exists for, and a digest that agrees on 32 bytes and disagrees
+   on 64 is the one this corpus is here to catch."
+  [0 1 55 56 63 64 65 127 128 129])
+
+(defn install-sha256!
+  "Install a faster synchronous SHA-256 `f` (bytes -> 32 bytes), after proving
+  it agrees with the portable implementation. Returns the installed fn.
+
+  Throws when it disagrees on any corpus input, or when it is absent on a host
+  that has no seam. Refusing beats returning false: this is called for its
+  effect, and a caller that dropped the result would be running an unverified
+  digest under a name that promises SHA-256."
+  [f]
+  #?(:clj (throw (ex-info "multiformats: the JVM already uses MessageDigest"
+                          {:type :multiformats/no-seam}))
+     :cljs
+     (do
+       (doseq [n install-corpus]
+         (let [b (js/Uint8Array. n)]
+           (dotimes [i n] (aset b i (bit-and (* i 31) 0xff)))
+           (let [want (portable-sha256 b) got (f b)]
+             (when-not (and got (= 32 (.-length got))
+                            (every? #(= (aget want %) (aget got %)) (range 32)))
+               (throw (ex-info "multiformats: candidate digest disagrees with SHA-256"
+                               {:type :multiformats/digest-mismatch :length n}))))))
+       (reset! sha256-impl f)
+       f)))
+
+(defn sha256
+  "SHA-256 digest bytes.
+
+  The JVM uses `MessageDigest`, which is always present. ClojureScript uses
+  whatever `install-sha256!` has proved and installed, and the portable
+  implementation until something has."
+  [b]
+  #?(:clj (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                   (if (bytes? b) b (byte-array (map unchecked-byte (byte-seq b)))))
+     :cljs (@sha256-impl b)))
 
 (defn sha384
   "SHA-384 digest bytes (48 bytes). Same backend as `sha256`.

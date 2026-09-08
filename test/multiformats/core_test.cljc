@@ -296,3 +296,46 @@
           "sha2-256")
       (is (= 0x20 (bit-and #?(:clj (aget ^bytes mh 1) :cljs (aget mh 1)) 0xff))
           "32 bytes long"))))
+
+;; ── the digest seam ──────────────────────────────────────────────────────────
+
+#?(:cljs
+   (deftest an-installed-digest-must-agree-before-it-is-installed
+     ;; The whole risk of a seam is that it lets a DIFFERENT function be called
+     ;; SHA-256. So the installer proves the candidate first, and refuses.
+     (let [truncating (fn [b] (let [d (mf/portable-sha256 b)]
+                                (aset d 31 (bit-xor (aget d 31) 1)) d))]
+       (is (thrown? :default (mf/install-sha256! truncating))
+           "a digest that differs in one bit is refused")
+       ;; And refused WITHOUT installing: the previous implementation still
+       ;; answers. A failed install that left the candidate in place would be
+       ;; the worst of both.
+       (is (= (vec (mf/portable-sha256 (js/Uint8Array. 64)))
+              (vec (mf/sha256 (js/Uint8Array. 64))))))
+     (let [wrong-length (fn [_] (js/Uint8Array. 16))]
+       (is (thrown? :default (mf/install-sha256! wrong-length))))))
+
+#?(:cljs
+   (deftest an-agreeing-digest-installs-and-is-used
+     ;; The positive control. Without it the test above passes on a seam that
+     ;; refuses everything, which is not a seam.
+     (let [called (atom 0)
+           echo (fn [b] (swap! called inc) (mf/portable-sha256 b))]
+       (is (fn? (mf/install-sha256! echo)))
+       (let [before @called
+             out (mf/sha256 (js/Uint8Array. 100))]
+         (is (> @called before) "the installed digest is the one that runs")
+         (is (= 32 (.-length out))))
+       ;; Put the portable one back so ordering between tests cannot matter.
+       (mf/install-sha256! mf/portable-sha256))))
+
+(deftest sha256-agrees-with-a-known-vector
+  ;; NIST FIPS 180-4 example: SHA-256("abc"). Pinned as a literal, because a
+  ;; seam that installs a host digest needs one assertion that does not come
+  ;; from the implementation it is replacing.
+  (let [abc #?(:clj (.getBytes "abc" "UTF-8")
+               :cljs (.encode (js/TextEncoder.) "abc"))
+        want [0xba 0x78 0x16 0xbf 0x8f 0x01 0xcf 0xea 0x41 0x41 0x40 0xde 0x5d 0xae 0x22 0x23
+              0xb0 0x03 0x61 0xa3 0x96 0x17 0x7a 0x9c 0xb4 0x10 0xff 0x61 0xf2 0x00 0x15 0xad]
+        got (mf/sha256 abc)]
+    (is (= want (mapv #(bit-and % 0xff) (vec got))))))
