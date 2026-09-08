@@ -2,7 +2,7 @@
   "Correctness pinned to the canonical `ipfs add --cid-version=1 --raw-leaves`
    output (these vectors were minted by real go-ipfs/kubo) plus encode/decode
    round-trips. No network, no ipfs CLI at test time."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             #?(:clj [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [multiformats.core :as mf]))

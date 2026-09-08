@@ -28,7 +28,7 @@
   flags like `/quic`, and length-prefixed for variable ones like `/p2p`.
   Getting a size wrong does not fail loudly: it consumes the wrong number of
   octets and reinterprets everything after it as a different address."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [multiformats.core :as mf]))
 
 ;; ── the protocol table ────────────────────────────────────────────────────

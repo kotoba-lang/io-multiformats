@@ -22,7 +22,7 @@
 ;; a small per-platform byte construction. Only `cid-of-file` stays :clj-only —
 ;; that's genuine file I/O, not a gap.
 (ns multiformats.core
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [multiformats.base32 :as base32-codec]
             [sha2.core :as sha2]
             [sha2.sha512 :as sha512])
