@@ -339,3 +339,26 @@
               0xb0 0x03 0x61 0xa3 0x96 0x17 0x7a 0x9c 0xb4 0x10 0xff 0x61 0xf2 0x00 0x15 0xad]
         got (mf/sha256 abc)]
     (is (= want (mapv #(bit-and % 0xff) (vec got))))))
+
+(deftest the-provider-says-which-digest-is-running
+  ;; The affordance that makes a comment like the one in this fn's docstring
+  ;; checkable. Asserted in BOTH directions on cljs, because a reporter that
+  ;; always says one thing reports nothing.
+  #?(:clj (is (= :message-digest (mf/sha256-provider)))
+     :cljs
+     (do
+       (is (= :portable (mf/sha256-provider))
+           "the default is portable, and it says so")
+       ;; Installing the PORTABLE fn through the seam still reports :portable.
+       ;; That is the useful semantic and it was measured into existence: the
+       ;; question a consumer asks is "am I paying the slow one", not "was
+       ;; install called". The first version of this test asserted the other
+       ;; reading and the implementation refused it.
+       (mf/install-sha256! mf/portable-sha256)
+       (is (= :portable (mf/sha256-provider)))
+       ;; A genuinely different implementation reports :installed.
+       (mf/install-sha256! (fn [b] (mf/portable-sha256 b)))
+       (is (= :installed (mf/sha256-provider)))
+       ;; Leave the namespace as the rest of the suite found it.
+       (mf/install-sha256! mf/portable-sha256)
+       (is (= :portable (mf/sha256-provider))))))

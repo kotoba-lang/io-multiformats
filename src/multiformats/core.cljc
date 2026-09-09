@@ -172,12 +172,35 @@
        (reset! sha256-impl f)
        f)))
 
+(defn sha256-provider
+  "Which digest `sha256` will actually run: `:message-digest` on the JVM,
+  `:installed` or `:portable` on ClojureScript.
+
+  Exists because the alternative is believing. Measured 2026-09-09, a consumer
+  of this library carried the comment \"sha256 itself is already provided for
+  both hosts by io-multiformats (MessageDigest on the JVM, @noble/hashes on
+  cljs), so do not write one\" -- and the cljs half had never been true. It was
+  the portable implementation, at 180x to 3000x the cost of the host digest
+  depending on input length, and nothing in the library let that comment be
+  checked.
+
+  A consumer that cares can now assert it, and a build can gate on it.
+
+  It reports which IMPLEMENTATION runs, not whether `install-sha256!` was
+  called: installing `portable-sha256` through the seam still answers
+  `:portable`, because the question a consumer asks is whether it is paying the
+  slow one."
+  []
+  #?(:clj :message-digest
+     :cljs (if (identical? @sha256-impl portable-sha256) :portable :installed)))
+
 (defn sha256
   "SHA-256 digest bytes.
 
   The JVM uses `MessageDigest`, which is always present. ClojureScript uses
   whatever `install-sha256!` has proved and installed, and the portable
-  implementation until something has."
+  implementation until something has -- ask `sha256-provider` rather than
+  assuming, because the difference is 180x to 3000x."
   [b]
   #?(:clj (.digest (java.security.MessageDigest/getInstance "SHA-256")
                    (if (bytes? b) b (byte-array (map unchecked-byte (byte-seq b)))))
