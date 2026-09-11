@@ -72,7 +72,7 @@ input — a multi-block dag-pb tree is intentionally out of scope.
 ## Correctness
 
 ```bash
-clojure -M:test                    # JVM (no network, no ipfs at test time)
+kbb -M:test                    # JVM (no network, no ipfs at test time)
 npm install && npm run test:cljs   # real ClojureScript, via shadow-cljs node-test
 ```
 
