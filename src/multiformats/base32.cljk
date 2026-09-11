@@ -15,6 +15,7 @@
   a Cloudflare Worker poll that returns an empty list cost 760 ms of CPU
   (ADR-2609051700). Same output, byte for byte -- `base32_test.cljc` holds the
   RFC 4648 vectors plus a 344-case differential against the old expansion."
+  {:kotoba/export [decode encode]}
   (:refer-clojure :exclude [decode]))
 
 (def ^:private alphabet "abcdefghijklmnopqrstuvwxyz234567")
