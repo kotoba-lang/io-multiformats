@@ -4,7 +4,7 @@
   This library is compiled into `kotobase-protocols-worker`, which serves
   s3 / atproto / pinning / sparql / gremlin / graphql on kotobase.net, so
   ClojureScript is where its code executes. The repo's own cljs path was
-  `shadow-cljs compile test` -- a JVM build, which the murakumo fleet cannot
+  `amu compile --target wasm32-browser test` -- a JVM build, which the murakumo fleet cannot
   run as an `:nbb-test` gate, so in practice only the JVM half was checked.
 
   Measured 2026-08-17, that mattered in both directions at once:
@@ -20,7 +20,7 @@
 
   One defect per host. A gate on either runtime alone sees exactly half.
 
-      npx nbb run-tests.cljk"
+      kbb --backend sci run-tests.cljk"
   (:require [cljs.test :as t]
             [multiformats.base32-test]
             [multiformats.core-test]
