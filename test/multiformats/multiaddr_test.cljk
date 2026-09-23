@@ -1,5 +1,5 @@
 (ns multiformats.multiaddr-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [multiformats.multiaddr :as ma]))
 
 ;; ── what a peer can send ──────────────────────────────────────────────────
