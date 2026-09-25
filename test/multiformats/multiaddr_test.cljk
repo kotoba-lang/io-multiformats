@@ -19,11 +19,11 @@
   ;; here unnoticed.
   (doseq [[label bs] [["ten continuation octets" (vec (repeat 10 0x80))]
                       ["nine continuation then a payload" (conj (vec (repeat 9 0x80)) 0x01)]]]
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (ma/->string bs))
         label))
   (testing "a truncated varint is still its own refusal"
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (ma/->string [0x80])))))
 
 ;; ── the canonical binary form ─────────────────────────────────────────────
@@ -91,12 +91,12 @@
 (deftest malformed-addresses-are-refused-not-partially-understood
   (doseq [bad ["ip4/127.0.0.1" "/ip4" "/ip4/127.0.0.1/tcp"
                "/frobnicate/1" "/ip4/999.0.0.1/tcp/1" "/ip4/1.2.3.4/tcp/70000"]]
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) (ma/parse bad))
+    (is (thrown? js/Error (ma/parse bad))
         (str bad " should be refused")))
   (testing "and a truncated binary form too"
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (ma/->string [0x04 127 0])))
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (ma/->string [0xFF 0xFF 0x01])))))
 
 (deftest a-fixed-width-value-must-be-exactly-that-wide

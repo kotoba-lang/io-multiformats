@@ -2,13 +2,13 @@
   "Correctness pinned to the canonical `ipfs add --cid-version=1 --raw-leaves`
    output (these vectors were minted by real go-ipfs/kubo) plus encode/decode
    round-trips. No network, no ipfs CLI at test time."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             #?(:clj [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [multiformats.core :as mf]))
 
 (defn- utf8-bytes [s]
-  #?(:clj (.getBytes ^String s "UTF-8")
+  #?(:clj (kbytes/utf8-bytes ^String s)
      :cljs (.encode (js/TextEncoder.) s)))
 
 (defn- bytes-of [ints]
@@ -84,9 +84,9 @@
   (is (= [128 128 128 128 128 1] (mapv #(bit-and % 0xff) (mf/varint 34359738368))))
   (testing "and the edge is refused rather than rounded"
     (is (= 8 (count (mf/varint mf/max-exact))))
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (mf/varint (inc mf/max-exact))))
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (mf/varint -1)))))
 
 (deftest varint-unsigned
@@ -333,7 +333,7 @@
   ;; NIST FIPS 180-4 example: SHA-256("abc"). Pinned as a literal, because a
   ;; seam that installs a host digest needs one assertion that does not come
   ;; from the implementation it is replacing.
-  (let [abc #?(:clj (.getBytes "abc" "UTF-8")
+  (let [abc #?(:clj (kbytes/utf8-bytes "abc")
                :cljs (.encode (js/TextEncoder.) "abc"))
         want [0xba 0x78 0x16 0xbf 0x8f 0x01 0xcf 0xea 0x41 0x41 0x40 0xde 0x5d 0xae 0x22 0x23
               0xb0 0x03 0x61 0xa3 0x96 0x17 0x7a 0x9c 0xb4 0x10 0xff 0x61 0xf2 0x00 0x15 0xad]
