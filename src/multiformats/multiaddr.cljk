@@ -29,7 +29,7 @@
   Getting a size wrong does not fail loudly: it consumes the wrong number of
   octets and reinterprets everything after it as a different address."
   {:kotoba/export [->octets ->string code->name components encapsulate equal? parse peer-id protocol protocol-names protocols transport value-for without-peer-id]}
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [multiformats.core :as mf]))
 
 ;; ── the protocol table ────────────────────────────────────────────────────
@@ -89,11 +89,11 @@
   every string-valued component (`/dns4/…`, `/unix/…`) encoded as zeros there
   and decoded back as blanks. Caught by CI, not by the JVM suite."
   [s]
-  #?(:clj (vec (.getBytes ^String s "UTF-8"))
+  #?(:clj (vec (kbytes/utf8-bytes ^String s))
      :cljs (vec (.encode (js/TextEncoder.) s))))
 
 (defn- utf8-str [bs]
-  #?(:clj (String. (byte-array (map unchecked-byte bs)) "UTF-8")
+  #?(:clj (kbytes/utf8-string (byte-array (map unchecked-byte bs)))
      :cljs (.decode (js/TextDecoder. "utf-8") (js/Uint8Array.from (clj->js (vec bs))))))
 
 (defn- put-varint
