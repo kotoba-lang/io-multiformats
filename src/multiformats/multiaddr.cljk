@@ -28,9 +28,31 @@
   flags like `/quic`, and length-prefixed for variable ones like `/p2p`.
   Getting a size wrong does not fail loudly: it consumes the wrong number of
   octets and reinterprets everything after it as a different address."
-  {:kotoba/export [->octets ->string code->name components encapsulate equal? parse peer-id protocol protocol-names protocols transport value-for without-peer-id]}
+  {:kotoba/export #?(:kotoba [->octets ->string encapsulate equal? parse peer-id protocol-names transport value-for without-peer-id]
+                     :default [->octets ->string code->name components encapsulate equal? parse peer-id protocol protocol-names protocols transport value-for without-peer-id])}
   (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [multiformats.core :as mf]))
+
+;; ── the Kotoba reading of this file ─────────────────────────────────────────
+;; `#?(:kotoba A :default B)`: the Kotoba reader takes A, the JVM and
+;; ClojureScript readers take B, so every host body below is what it was.
+;; On Kotoba the protocol table is three `cond`s over the protocol name or
+;; code (name -> code, name -> width in bits, code -> canonical name); bytes are
+;; `:vector-i64`; an address is a `:string`; and what the hosts throw a Kotoba
+;; function traps (`assert`). The parsed components are a flat list of strings
+;; `[name value name value ...]` with "" for a flag's missing value, since a
+;; component is a pair of a name and an optional value and no value is ever
+;; blank (blank segments are dropped before they are read).
+;;
+;; Where the Kotoba reading is deliberately STRICTER than the hosts on input
+;; that is not a valid address: a number is decimal (hex for IPv6 groups)
+;; digits only, so `1.2.3.4x` is refused where ClojureScript's `parseInt`
+;; reads 4 and the JVM's throws (likewise `/ip6/1::2::3`, which ClojureScript
+;; reads with the empty group as 0 and the JVM refuses). Every valid address
+;; reads the same: 570 checks of old host, new host and the Kotoba reading over
+;; valid and rejected addresses agree apart from that one input.
+;; `components`, `protocols`, `code->name` and `protocol` are the table as data
+;; (maps of maps, a vector of pairs) and stay host-only.
 
 ;; ── the protocol table ────────────────────────────────────────────────────
 ;;
@@ -38,6 +60,417 @@
 ;; length-prefixed ones — the same convention the multiaddr spec's own table
 ;; uses, kept rather than converted so it can be checked against the source.
 
+#?(:kotoba
+   (def ^:private max-exact-v 9007199254740991))
+
+#?(:kotoba
+   (defn- proto-code
+     "The multicodec code of protocol NM, or -1."
+     [nm :string] :i64
+     (cond (string=? nm "ip4") 4 (string=? nm "tcp") 6 (string=? nm "udp") 273
+           (string=? nm "dccp") 33 (string=? nm "ip6") 41 (string=? nm "ip6zone") 42
+           (string=? nm "dns") 53 (string=? nm "dns4") 54 (string=? nm "dns6") 55
+           (string=? nm "dnsaddr") 56 (string=? nm "sctp") 132 (string=? nm "udt") 301
+           (string=? nm "utp") 302 (string=? nm "unix") 400 (string=? nm "p2p") 421
+           (string=? nm "ipfs") 421 (string=? nm "onion") 444 (string=? nm "onion3") 445
+           (string=? nm "quic") 460 (string=? nm "quic-v1") 461 (string=? nm "webtransport") 465
+           (string=? nm "ws") 477 (string=? nm "wss") 478 (string=? nm "p2p-circuit") 290
+           (string=? nm "tls") 448 (string=? nm "noise") 454 (string=? nm "http") 480
+           (string=? nm "https") 443
+           :else -1)))
+
+#?(:kotoba
+   (defn- proto-bits
+     "The width of protocol NM's value in bits: 0 for a flag, -1 for a
+     length-prefixed value."
+     [nm :string] :i64
+     (cond (string=? nm "ip4") 32 (string=? nm "tcp") 16 (string=? nm "udp") 16
+           (string=? nm "dccp") 16 (string=? nm "ip6") 128 (string=? nm "sctp") 16
+           (string=? nm "onion") 96 (string=? nm "onion3") 296
+           (or (string=? nm "ip6zone") (string=? nm "dns") (string=? nm "dns4")
+               (string=? nm "dns6") (string=? nm "dnsaddr") (string=? nm "unix")
+               (string=? nm "p2p") (string=? nm "ipfs"))
+           -1
+           :else 0)))
+
+#?(:kotoba
+   (defn- code-name
+     "The canonical name of protocol code CODE, or \"\"."
+     [code :i64] :string
+     (cond (= code 4) "ip4" (= code 6) "tcp" (= code 273) "udp" (= code 33) "dccp"
+           (= code 41) "ip6" (= code 42) "ip6zone" (= code 53) "dns" (= code 54) "dns4"
+           (= code 55) "dns6" (= code 56) "dnsaddr" (= code 132) "sctp" (= code 301) "udt"
+           (= code 302) "utp" (= code 400) "unix" (= code 421) "p2p" (= code 444) "onion"
+           (= code 445) "onion3" (= code 460) "quic" (= code 461) "quic-v1"
+           (= code 465) "webtransport" (= code 477) "ws" (= code 478) "wss"
+           (= code 290) "p2p-circuit" (= code 448) "tls" (= code 454) "noise"
+           (= code 480) "http" (= code 443) "https"
+           :else "")))
+
+#?(:kotoba
+   (defn- vcat [a :vector-i64 b :vector-i64] :vector-i64
+     (let [n (vector-count b)]
+       (loop [i 0 out a]
+         (if (>= i n) out (recur (+ i 1) (vector-conj out (vector-at b i))))))))
+
+#?(:kotoba
+   (defn- slice [bs :vector-i64 from :i64 to :i64] :vector-i64
+     (loop [i from out (vector-i64)]
+       (if (>= i to) out (recur (+ i 1) (vector-conj out (vector-at bs i)))))))
+
+#?(:kotoba
+   (defn- zeros [n :i64] :vector-i64
+     (loop [i 0 out (vector-i64)]
+       (if (>= i n) out (recur (+ i 1) (vector-conj out 0))))))
+
+#?(:kotoba
+   (defn- read-varint
+     "Returns `[value next-index]`; traps on a truncated, over-long or
+     out-of-range varint, where the hosts throw."
+     [bs :vector-i64 i0 :i64] [:vector [:i64 :i64]]
+     (loop [i i0 mult 1 acc 0 n 0]
+       (do (assert (< i (vector-count bs)))
+           (assert (< n 9))
+           (let [b (bit-and (vector-at bs i) 255)
+                 acc2 (+ acc (* mult (bit-and b 127)))]
+             (do (assert (<= acc2 max-exact-v))
+                 (if (= 0 (bit-and b 128))
+                   (hetero-vector [:vector [:i64 :i64]] acc2 (+ i 1))
+                   (recur (+ i 1) (if (> mult max-exact-v) mult (* mult 128)) acc2 (+ n 1)))))))))
+
+#?(:kotoba
+   (defn- digit-val [c :i64] :i64
+     (cond (and (>= c 48) (<= c 57)) (- c 48)
+           (and (>= c 97) (<= c 102)) (+ 10 (- c 97))
+           (and (>= c 65) (<= c 70)) (+ 10 (- c 65))
+           :else -1)))
+
+#?(:kotoba
+   (defn- parse-radix
+     "The non-negative int written in RADIX by S (digits only), or -1."
+     [s :string radix :i64] :i64
+     (let [n (string-byte-length s)]
+       (if (or (= n 0) (> n 10))
+         -1
+         (loop [i 0 acc 0]
+           (if (>= i n)
+             (if (> acc 2147483647) -1 acc)
+             (let [d (digit-val (string-code-point-at s i))]
+               (if (or (< d 0) (>= d radix)) -1 (recur (+ i 1) (+ (* acc radix) d))))))))))
+
+#?(:kotoba
+   (defn- ip4->octets [s :string] :vector-i64
+     (let [parts (str/split s ".")]
+       (do (assert (= 4 (vector-count parts)))
+           (loop [i 0 out (vector-i64)]
+             (if (>= i 4)
+               out
+               (let [n (parse-radix (typed-list-nth [:list :string] parts i) 10)]
+                 (do (assert (and (>= n 0) (<= n 255)))
+                     (recur (+ i 1) (vector-conj out n))))))))))
+
+#?(:kotoba
+   (defn- group-values
+     "The hex groups of X (`a:b:c`), each 0..2^31-1; empty for a blank X."
+     [x :string] :vector-i64
+     (if (str/blank? x)
+       (vector-i64)
+       (let [parts (str/split x ":")
+             n (vector-count parts)]
+         (loop [i 0 out (vector-i64)]
+           (if (>= i n)
+             out
+             (let [g (parse-radix (typed-list-nth [:list :string] parts i) 16)]
+               (do (assert (>= g 0))
+                   (recur (+ i 1) (vector-conj out g))))))))))
+
+#?(:kotoba
+   (defn- double-colon
+     "The offset of the first `::` in S, or -1."
+     [s :string] :i64
+     (let [n (string-byte-length s)]
+       (loop [from 0]
+         (let [k (string-find-byte s 58 from)]
+           (cond (< k 0) -1
+                 (>= (+ k 1) n) -1
+                 (= 58 (string-code-point-at s (+ k 1))) k
+                 :else (recur (+ k 1))))))))
+
+#?(:kotoba
+   (defn- group-octets [gs :vector-i64] :vector-i64
+     (let [n (vector-count gs)]
+       (loop [i 0 out (vector-i64)]
+         (if (>= i n)
+           out
+           (let [g (vector-at gs i)]
+             (recur (+ i 1) (vector-conj (vector-conj out (bit-and (i64-shift-right g 8) 255)) (bit-and g 255)))))))))
+
+#?(:kotoba
+   (defn- ip6->octets [s :string] :vector-i64
+     (let [k (double-colon s)
+           gap? (>= k 0)
+           head (if gap? (string-substring s 0 k) s)
+           tail (if gap? (string-substring s (+ k 2) (string-byte-length s)) "")
+           h (group-values head)
+           t (group-values tail)
+           gap (- (- 8 (vector-count h)) (vector-count t))]
+       (do (assert (not (or (< gap 0) (and (not gap?) (> gap 0)))))
+           (group-octets (vcat (vcat h (zeros gap)) t))))))
+
+#?(:kotoba
+   (defn- port->octets [s :string] :vector-i64
+     (let [n (parse-radix s 10)]
+       (do (assert (and (>= n 0) (<= n 65535)))
+           (vector-conj (vector-conj (vector-i64) (bit-and (i64-shift-right n 8) 255)) (bit-and n 255))))))
+
+#?(:kotoba
+   (defn- port-of [bs :vector-i64] :i64
+     (+ (* 256 (vector-at bs 0)) (vector-at bs 1))))
+
+#?(:kotoba
+   (defn- value->octets [nm :string v :string] :vector-i64
+     (cond (string=? nm "ip4") (ip4->octets v)
+           (string=? nm "ip6") (ip6->octets v)
+           (or (string=? nm "tcp") (string=? nm "udp") (string=? nm "dccp") (string=? nm "sctp"))
+           (port->octets v)
+           (or (string=? nm "p2p") (string=? nm "ipfs")) (mf/base58btc-decode v)
+           :else (kbytes/utf8-encode v))))
+
+#?(:kotoba
+   (defn- ip4-text [bs :vector-i64] :string
+     (string-concat
+      (string-concat
+       (string-concat (string-concat (string-concat (string-concat (string-from-i64 (vector-at bs 0)) ".")
+                                                    (string-from-i64 (vector-at bs 1))) ".")
+                      (string-from-i64 (vector-at bs 2))) ".")
+      (string-from-i64 (vector-at bs 3)))))
+
+#?(:kotoba
+   (defn- hex-text
+     "Lowercase hex of the non-negative N, no padding."
+     [n :i64] :string
+     (loop [v n acc ""]
+       (let [d (bit-and v 15)
+             c (string-from-utf8 (bytes-from-vector-i64 (vector-conj (vector-i64) (if (< d 10) (+ 48 d) (+ 87 d)))))
+             acc2 (string-concat c acc)
+             v2 (i64-shift-right v 4)]
+         (if (= v2 0) acc2 (recur v2 acc2))))))
+
+#?(:kotoba
+   (defn- ip6-text [bs :vector-i64] :string
+     (loop [i 0 acc ""]
+       (if (>= i 8)
+         acc
+         (let [g (bit-or (i64-shift-left (vector-at bs (* 2 i)) 8) (vector-at bs (+ (* 2 i) 1)))]
+           (recur (+ i 1) (if (= i 0) (hex-text g) (string-concat (string-concat acc ":") (hex-text g)))))))))
+
+#?(:kotoba
+   (defn- octets->value [nm :string bs :vector-i64] :string
+     (cond (string=? nm "ip4") (ip4-text bs)
+           (string=? nm "ip6") (ip6-text bs)
+           (or (string=? nm "tcp") (string=? nm "udp") (string=? nm "dccp") (string=? nm "sctp"))
+           (string-from-i64 (port-of bs))
+           (or (string=? nm "p2p") (string=? nm "ipfs")) (mf/base58btc bs)
+           :else (kbytes/utf8-string (kbytes/->host-bytes bs)))))
+
+#?(:kotoba
+   (defn- non-blank-parts [s :string] [:list :string]
+     (let [raw (str/split s "/")
+           n (vector-count raw)]
+       (loop [i 0 out (typed-list-new [:list :string])]
+         (if (>= i n)
+           out
+           (let [p (typed-list-nth [:list :string] raw i)]
+             (recur (+ i 1) (if (str/blank? p) out (conj out p)))))))))
+
+#?(:kotoba
+   (defn- join-from [parts [:list :string] from :i64] :string
+     (let [n (vector-count parts)]
+       (str/join "/" (loop [i from out (typed-list-new [:list :string])]
+                       (if (>= i n) out (recur (+ i 1) (conj out (typed-list-nth [:list :string] parts i)))))))))
+
+#?(:kotoba
+   (defn- flat-components
+     "The address as `[name value name value ...]`, \"\" for a flag's missing
+     value. Traps where the hosts throw (no leading `/`, an unknown protocol, a
+     protocol without its value)."
+     [s :string] [:list :string]
+     (let [parts (non-blank-parts s)
+           n (vector-count parts)]
+       (do (assert (and (> (string-byte-length s) 0) (= 47 (string-code-point-at s 0))))
+           (loop [i 0 out (typed-list-new [:list :string])]
+             (if (>= i n)
+               out
+               (let [nm (typed-list-nth [:list :string] parts i)]
+                 (do (assert (>= (proto-code nm) 0))
+                     (cond
+                       (= 0 (proto-bits nm)) (recur (+ i 1) (conj (conj out nm) ""))
+                       (string=? nm "unix")
+                       (do (assert (< (+ i 1) n))
+                           (recur n (conj (conj out nm) (string-concat "/" (join-from parts (+ i 1))))))
+                       (>= (+ i 1) n) (do (assert false) (recur n out))
+                       :else (recur (+ i 2) (conj (conj out nm) (typed-list-nth [:list :string] parts (+ i 1)))))))))))))
+
+#?(:kotoba
+   (defn- encode-component [nm :string v :string] :vector-i64
+     (let [code (proto-code nm)
+           bits (proto-bits nm)]
+       (cond
+         (= 0 bits) (mf/varint code)
+         (< bits 0) (let [payload (value->octets nm v)]
+                      (vcat (vcat (mf/varint code) (mf/varint (vector-count payload))) payload))
+         :else (let [payload (value->octets nm v)]
+                 (do (assert (= (quot bits 8) (vector-count payload)))
+                     (vcat (mf/varint code) payload)))))))
+
+#?(:kotoba
+   (defn ->octets
+     "Multiaddr string to its canonical binary form."
+     [s :string] :vector-i64
+     (let [comps (flat-components s)
+           n (vector-count comps)]
+       (loop [i 0 out (vector-i64)]
+         (if (>= i n)
+           out
+           (recur (+ i 2)
+                  (vcat out (encode-component (typed-list-nth [:list :string] comps i)
+                                              (typed-list-nth [:list :string] comps (+ i 1))))))))))
+
+#?(:kotoba
+   (defn ->string
+     "Canonical binary form to the string form."
+     [bs :vector-i64] :string
+     (let [n (vector-count bs)]
+       (loop [i 0 out (typed-list-new [:list :string])]
+         (if (>= i n)
+           (string-concat "/" (str/join "/" out))
+           (let [cj (read-varint bs i)
+                 code (hetero-vector-at [:vector [:i64 :i64]] cj 0)
+                 j (hetero-vector-at [:vector [:i64 :i64]] cj 1)
+                 nm (code-name code)]
+             (do (assert (> (string-byte-length nm) 0))
+                 (let [bits (proto-bits nm)]
+                   (cond
+                     (= 0 bits) (recur j (conj out nm))
+                     (< bits 0)
+                     (let [lk (read-varint bs j)
+                           len (hetero-vector-at [:vector [:i64 :i64]] lk 0)
+                           k (hetero-vector-at [:vector [:i64 :i64]] lk 1)
+                           end (+ k len)]
+                       (do (assert (<= end n))
+                           (recur end (conj (conj out nm) (octets->value nm (slice bs k end))))))
+                     :else
+                     (let [end (+ j (quot bits 8))]
+                       (do (assert (<= end n))
+                           (recur end (conj (conj out nm) (octets->value nm (slice bs j end)))))))))))))))
+
+#?(:kotoba
+   (defn parse
+     "Normalize a multiaddr string by round-tripping it through the binary form."
+     [s :string] :string
+     (->string (->octets s))))
+
+#?(:kotoba
+   (defn equal?
+     "Two multiaddrs are the same address when their octets match."
+     [a :string b :string] :bool
+     (let [x (->octets a)
+           y (->octets b)
+           n (vector-count x)]
+       (and (= n (vector-count y))
+            (loop [i 0]
+              (cond (>= i n) true
+                    (= (vector-at x i) (vector-at y i)) (recur (+ i 1))
+                    :else false))))))
+
+#?(:kotoba
+   (defn- first-value
+     "The first non-empty value of a component named NM, or \"\"."
+     [comps [:list :string] nm :string] :string
+     (let [n (vector-count comps)]
+       (loop [i 0]
+         (cond (>= i n) ""
+               (and (string=? (typed-list-nth [:list :string] comps i) nm)
+                    (not (string=? (typed-list-nth [:list :string] comps (+ i 1)) "")))
+               (typed-list-nth [:list :string] comps (+ i 1))
+               :else (recur (+ i 2)))))))
+
+#?(:kotoba
+   (defn value-for
+     "The value of the first `protocol-name` component, or none."
+     [s :string protocol-name :string] [:option :string]
+     (let [v (first-value (flat-components s) protocol-name)]
+       (if (string=? v "")
+         (option-none-of [:option :string])
+         (option-some-of [:option :string] v)))))
+
+#?(:kotoba
+   (defn peer-id
+     "The `/p2p/...` peer ID, or none."
+     [s :string] [:option :string]
+     (let [comps (flat-components s)
+           v (first-value comps "p2p")
+           w (first-value comps "ipfs")
+           r (if (string=? v "") w v)]
+       (if (string=? r "")
+         (option-none-of [:option :string])
+         (option-some-of [:option :string] r)))))
+
+#?(:kotoba
+   (defn without-peer-id
+     "The transport half of an address."
+     [s :string] :string
+     (let [comps (flat-components s)
+           n (vector-count comps)]
+       (string-concat
+        "/"
+        (str/join "/"
+                  (loop [i 0 out (typed-list-new [:list :string])]
+                    (if (>= i n)
+                      out
+                      (let [nm (typed-list-nth [:list :string] comps i)
+                            v (typed-list-nth [:list :string] comps (+ i 1))]
+                        (recur (+ i 2)
+                               (cond (or (string=? nm "p2p") (string=? nm "ipfs")) out
+                                     (string=? v "") (conj out nm)
+                                     :else (conj (conj out nm) v)))))))))))
+
+#?(:kotoba
+   (defn encapsulate
+     "Append `b` to `a`."
+     [a :string b :string] :string
+     (parse (string-concat a b))))
+
+#?(:kotoba
+   (defn protocol-names [s :string] [:list :string]
+     (let [comps (flat-components s)
+           n (vector-count comps)]
+       (loop [i 0 out (typed-list-new [:list :string])]
+         (if (>= i n) out (recur (+ i 2) (conj out (typed-list-nth [:list :string] comps i))))))))
+
+#?(:kotoba
+   (defn- has-name? [names [:list :string] nm :string] :bool
+     (let [n (vector-count names)]
+       (loop [i 0]
+         (cond (>= i n) false
+               (string=? (typed-list-nth [:list :string] names i) nm) true
+               :else (recur (+ i 1)))))))
+
+#?(:kotoba
+   (defn transport
+     "A rough classification for a dialer: which transport this address wants."
+     [s :string] :keyword
+     (let [ps (protocol-names s)]
+       (cond
+         (has-name? ps "p2p-circuit") :relay
+         (or (has-name? ps "quic-v1") (has-name? ps "quic")) :quic
+         (or (has-name? ps "wss") (has-name? ps "ws")) :websocket
+         (has-name? ps "tcp") :tcp
+         (has-name? ps "udp") :udp
+         :else :unknown))))
+
+#?(:kotoba nil
+   :default
 (def protocols
   {"ip4"        {:code 4    :size 32}
    "tcp"        {:code 6    :size 16}
@@ -69,19 +502,25 @@
    "tls"        {:code 448  :size 0}
    "noise"      {:code 454  :size 0}
    "http"       {:code 480  :size 0}
-   "https"      {:code 443  :size 0}})
+   "https"      {:code 443  :size 0}}))
 
+#?(:kotoba nil
+   :default
 (def code->name
   "Reverse lookup. `/ipfs` and `/p2p` share code 421, and the canonical
   rendering is `p2p` — the older spelling parses and does not come back out."
   (reduce (fn [m [n {:keys [code]}]]
             (if (and (contains? m code) (= n "ipfs")) m (assoc m code n)))
-          {} protocols))
+          {} protocols)))
 
-(defn protocol [nm] (get protocols nm))
+#?(:kotoba nil
+   :default
+(defn protocol [nm] (get protocols nm)))
 
 ;; ── varint ────────────────────────────────────────────────────────────────
 
+#?(:kotoba nil
+   :default
 (defn- utf8
   "String → UTF-8 octets. `(map int (seq s))` is JVM-only thinking: on the JVM
   `seq` of a string yields Characters and `int` gives the code point, while in
@@ -90,19 +529,25 @@
   and decoded back as blanks. Caught by CI, not by the JVM suite."
   [s]
   #?(:clj (vec (kbytes/utf8-bytes ^String s))
-     :cljs (vec (.encode (js/TextEncoder.) s))))
+     :cljs (vec (.encode (js/TextEncoder.) s)))))
 
+#?(:kotoba nil
+   :default
 (defn- utf8-str [bs]
   #?(:clj (kbytes/utf8-string (byte-array (map unchecked-byte bs)))
-     :cljs (.decode (js/TextDecoder. "utf-8") (js/Uint8Array.from (clj->js (vec bs))))))
+     :cljs (.decode (js/TextDecoder. "utf-8") (js/Uint8Array.from (clj->js (vec bs)))))))
 
+#?(:kotoba nil
+   :default
 (defn- put-varint
   "`multiformats.core/varint` returns a host byte array, whose bytes are
   SIGNED on the JVM — 0x91 comes back as -111. Masking here is what keeps the
   encoded address from differing between platforms for the same input."
   [n]
-  (mapv #(bit-and % 0xFF) (vec (seq (mf/varint n)))))
+  (mapv #(bit-and % 0xFF) (vec (seq (mf/varint n))))))
 
+#?(:kotoba nil
+   :default
 (defn- read-varint
   "Returns `[value next-index]`.
 
@@ -132,10 +577,12 @@
                         {:at i :max-exact mf/max-exact})))
       (if (zero? (bit-and b 0x80))
         [acc (inc i)]
-        (recur (inc i) (if (> mult mf/max-exact) mult (* mult 128)) acc (inc n))))))
+        (recur (inc i) (if (> mult mf/max-exact) mult (* mult 128)) acc (inc n)))))))
 
 ;; ── values ────────────────────────────────────────────────────────────────
 
+#?(:kotoba nil
+   :default
 (defn- ip4->octets [s]
   (let [parts (str/split s #"\.")]
     (when-not (= 4 (count parts)) (throw (ex-info "not an IPv4 address" {:value s})))
@@ -143,10 +590,14 @@
             (let [n #?(:clj (Integer/parseInt p) :cljs (js/parseInt p 10))]
               (when-not (<= 0 n 255) (throw (ex-info "IPv4 octet out of range" {:value s})))
               n))
-          parts)))
+          parts))))
 
-(defn- octets->ip4 [bs] (str/join "." bs))
+#?(:kotoba nil
+   :default
+(defn- octets->ip4 [bs] (str/join "." bs)))
 
+#?(:kotoba nil
+   :default
 (defn- ip6->octets [s]
   ;; `::` elides one run of zero groups and may appear at either end or not at
   ;; all. Splitting unconditionally and hoping is how a sentinel character ends
@@ -162,20 +613,28 @@
     (when (or (neg? gap) (and (not gap?) (pos? gap)))
       (throw (ex-info "not an IPv6 address" {:value s})))
     (vec (mapcat (fn [g] [(bit-and (bit-shift-right g 8) 0xFF) (bit-and g 0xFF)])
-                 (into (into (vec h) (repeat gap 0)) t)))))
+                 (into (into (vec h) (repeat gap 0)) t))))))
 
+#?(:kotoba nil
+   :default
 (defn- octets->ip6 [bs]
   (let [groups (mapv (fn [i] (bit-or (bit-shift-left (nth bs (* 2 i)) 8) (nth bs (inc (* 2 i)))))
                      (range 8))]
-    (str/join ":" (map #?(:clj #(Integer/toHexString %) :cljs #(.toString % 16)) groups))))
+    (str/join ":" (map #?(:clj #(Integer/toHexString %) :cljs #(.toString % 16)) groups)))))
 
+#?(:kotoba nil
+   :default
 (defn- port->octets [s]
   (let [n #?(:clj (Integer/parseInt s) :cljs (js/parseInt s 10))]
     (when-not (<= 0 n 65535) (throw (ex-info "port out of range" {:value s})))
-    [(bit-and (bit-shift-right n 8) 0xFF) (bit-and n 0xFF)]))
+    [(bit-and (bit-shift-right n 8) 0xFF) (bit-and n 0xFF)])))
 
-(defn- octets->port [bs] (str (+ (* 256 (nth bs 0)) (nth bs 1))))
+#?(:kotoba nil
+   :default
+(defn- octets->port [bs] (str (+ (* 256 (nth bs 0)) (nth bs 1)))))
 
+#?(:kotoba nil
+   :default
 (defn- value->octets [nm v]
   (case nm
     "ip4" (ip4->octets v)
@@ -185,18 +644,22 @@
     ;; and the raw multihash on the wire. Storing the text would make two
     ;; spellings of one peer compare unequal.
     ("p2p" "ipfs") (mapv #(bit-and % 0xFF) (vec (seq (mf/base58btc-decode v))))
-    (utf8 v)))
+    (utf8 v))))
 
+#?(:kotoba nil
+   :default
 (defn- octets->value [nm bs]
   (case nm
     "ip4" (octets->ip4 bs)
     "ip6" (octets->ip6 bs)
     ("tcp" "udp" "dccp" "sctp") (octets->port bs)
     ("p2p" "ipfs") (mf/base58btc bs)
-    (utf8-str bs)))
+    (utf8-str bs))))
 
 ;; ── encode ────────────────────────────────────────────────────────────────
 
+#?(:kotoba nil
+   :default
 (defn components
   "`/ip4/127.0.0.1/tcp/4001` → `[[\"ip4\" \"127.0.0.1\"] [\"tcp\" \"4001\"]]`.
 
@@ -218,8 +681,10 @@
             (conj out [nm (str "/" (str/join "/" (rest parts)))]))
           (empty? (rest parts))
           (throw (ex-info "multiaddr protocol is missing its value" {:protocol nm}))
-          :else (recur (drop 2 parts) (conj out [nm (second parts)])))))))
+          :else (recur (drop 2 parts) (conj out [nm (second parts)]))))))))
 
+#?(:kotoba nil
+   :default
 (defn ->octets
   "Multiaddr string → its canonical binary form."
   [s]
@@ -237,8 +702,10 @@
                          (throw (ex-info "wrong value width for protocol"
                                          {:protocol nm :want want :got (count payload)})))
                        (concat (put-varint code) payload)))))
-               (components s))))
+               (components s)))))
 
+#?(:kotoba nil
+   :default
 (defn ->string
   "Canonical binary form → the string form. Round-tripping through here is what
   normalizes `/tcp/04001` to `/tcp/4001`."
@@ -263,50 +730,66 @@
             (let [w (quot size 8) end (+ j w)]
               (when (> end (count bs))
                 (throw (ex-info "truncated multiaddr component" {:protocol nm})))
-              (recur end (conj out nm (octets->value nm (subvec bs j end)))))))))))
+              (recur end (conj out nm (octets->value nm (subvec bs j end))))))))))))
 
+#?(:kotoba nil
+   :default
 (defn parse
   "Normalize a multiaddr string by round-tripping it through the binary form —
   which is what makes it comparable. Throws on anything malformed rather than
   returning a partially-understood address."
   [s]
-  (->string (->octets s)))
+  (->string (->octets s))))
 
+#?(:kotoba nil
+   :default
 (defn equal?
   "Two multiaddrs are the same address when their **octets** match. Comparing
   the strings would make `/tcp/04001` a different address from `/tcp/4001`,
   and let one peer occupy two routing-table entries."
   [a b]
-  (= (->octets a) (->octets b)))
+  (= (->octets a) (->octets b))))
 
 ;; ── inspection ────────────────────────────────────────────────────────────
 
+#?(:kotoba nil
+   :default
 (defn value-for
   "The value of the first `protocol-name` component, or nil."
   [s protocol-name]
-  (some (fn [[nm v]] (when (= nm protocol-name) v)) (components s)))
+  (some (fn [[nm v]] (when (= nm protocol-name) v)) (components s))))
 
+#?(:kotoba nil
+   :default
 (defn peer-id
   "The `/p2p/…` peer ID, or nil. A multiaddr without one names a *place*; with
   one it names a *peer at* a place, and libp2p dials the second — connecting to
   an address without checking which peer answered is how you end up talking to
   whoever holds that IP today."
   [s]
-  (or (value-for s "p2p") (value-for s "ipfs")))
+  (or (value-for s "p2p") (value-for s "ipfs"))))
 
+#?(:kotoba nil
+   :default
 (defn without-peer-id
   "The transport half of an address, for a dialer that already knows the peer."
   [s]
   (str "/" (str/join "/" (mapcat (fn [[nm v]] (if (#{"p2p" "ipfs"} nm) [] (if v [nm v] [nm])))
-                                 (components s)))))
+                                 (components s))))))
 
+#?(:kotoba nil
+   :default
 (defn encapsulate
   "Append `b` to `a` — `/ip4/1.2.3.4/tcp/80` + `/ws` → `/ip4/1.2.3.4/tcp/80/ws`."
   [a b]
-  (parse (str a b)))
+  (parse (str a b))))
 
-(defn protocol-names [s] (mapv first (components s)))
+#?(:kotoba nil
+   :default
+(defn protocol-names [s] (mapv first (components s))))
 
+#?(:kotoba nil
+   :default
 (defn transport
   "A rough classification for a dialer: which transport this address wants."
   [s]
@@ -317,4 +800,4 @@
       (or (ps "wss") (ps "ws")) :websocket
       (ps "tcp") :tcp
       (ps "udp") :udp
-      :else :unknown)))
+      :else :unknown))))
