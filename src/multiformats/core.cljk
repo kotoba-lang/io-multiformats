@@ -22,20 +22,114 @@
 ;; a small per-platform byte construction. Only `cid-of-file` stays :clj-only —
 ;; that's genuine file I/O, not a gap.
 (ns multiformats.core
-  {:kotoba/export [base32 base32-decode base58btc base58btc-decode base64url base64url-decode cid->bytes cid->multihash cid->parts cidv1 cidv1-dag-cbor cidv1-raw codec-dag-cbor codec-raw hexify install-sha256! kotoba-cid max-exact multihash-sha256 portable-sha256 sha256 sha256-provider sha384 single-block-limit unhex varint varint-decode]}
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as kio] [kotoba.lang.text :as str]
+  {:kotoba/export #?(:kotoba [base32 base32-decode base58btc base58btc-decode base64url base64url-decode cid->bytes cidv1 cidv1-dag-cbor cidv1-raw codec-dag-cbor codec-raw hexify kotoba-cid max-exact multihash-sha256 sha256 single-block-limit unhex varint]
+                     :default [base32 base32-decode base58btc base58btc-decode base64url base64url-decode cid->bytes cid->multihash cid->parts cidv1 cidv1-dag-cbor cidv1-raw codec-dag-cbor codec-raw hexify install-sha256! kotoba-cid max-exact multihash-sha256 portable-sha256 sha256 sha256-provider sha384 single-block-limit unhex varint varint-decode])}
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [multiformats.base32 :as base32-codec]
-            [sha2.core :as sha2]
-            [sha2.sha512 :as sha512])
+            #?@(:kotoba [[kotoba.bytes.sha256 :as ksha256]]
+                :default [[kotoba.io :as kio] [sha2.core :as sha2] [sha2.sha512 :as sha512]]))
   #?(:clj (:import (java.io ByteArrayOutputStream))))
+
+;; ── the Kotoba reading of this file ─────────────────────────────────────────
+;; `#?(:kotoba A :default B)`: the Kotoba reader takes A, the JVM and
+;; ClojureScript readers take B, so every host body below is what it was.
+;; On Kotoba bytes are `:vector-i64` (as in kotoba.bytes and multiformats.base32),
+;; text is a UTF-8 `:string` walked by byte offset (every alphabet here is
+;; ASCII), and an input the hosts reject by throwing is a trap (`assert`).
+;;
+;; What the Kotoba surface does NOT carry, because it is host machinery and not
+;; part of the codec: the digest seam (`install-sha256!`, `sha256-provider`,
+;; `portable-sha256`: an atom of a function value), `sha384` (its SHA-512 is
+;; not on the Kotoba route), `cid-of-file` (file I/O), and the error-map
+;; readers `varint-decode` / `cid->parts` / `cid->multihash` (their
+;; `{:value .. :next ..}` | `{:error kw}` answers are untyped open maps).
+;; `sha256` is `kotoba.bytes.sha256/sha256-bytes` there, the same FIPS 180-4
+;; digest the hosts compute.
+;;
+;; Measured against the hosts (KIR reference interpreter vs nbb, 718 inputs):
+;; identical everywhere except that `unhex` of a non-hex digit traps on Kotoba
+;; where the JVM throws NumberFormatException and ClojureScript answers NaN.
+
+#?(:kotoba (def ^:private max-exact-v 9007199254740991))
+#?(:kotoba (def ^:private codec-raw-v 0x55))
+#?(:kotoba (def ^:private codec-dag-cbor-v 0x71))
+
+#?(:kotoba
+   (defn- ascii-string [v :vector-i64] :string
+     (string-from-utf8 (bytes-from-vector-i64 v))))
+
+#?(:kotoba
+   (defn- vcat [a :vector-i64 b :vector-i64] :vector-i64
+     (let [n (vector-count b)]
+       (loop [i 0 out a]
+         (if (>= i n) out (recur (+ i 1) (vector-conj out (vector-at b i))))))))
+
+#?(:kotoba
+   (defn- radix-flush
+     "Append the digits of CARRY in BASE to OUT, least significant first."
+     [out :vector-i64 carry :i64 base :i64] :vector-i64
+     (loop [c carry o out]
+       (if (> c 0)
+         (let [q (quot c base)] (recur q (vector-conj o (- c (* q base)))))
+         o))))
+
+#?(:kotoba
+   (defn- radix-step
+     "DIGITS (little-endian, in BASE) times MUL plus CARRY0, in BASE."
+     [digits :vector-i64 mul :i64 carry0 :i64 base :i64] :vector-i64
+     (let [n (vector-count digits)]
+       (loop [i 0 carry carry0 out (vector-i64)]
+         (if (>= i n)
+           (radix-flush out carry base)
+           (let [v (+ (* (vector-at digits i) mul) carry)
+                 q (quot v base)]
+             (recur (+ i 1) q (vector-conj out (- v (* q base))))))))))
 
 ;; ── base58btc — base-256 ↔ base-58 by integer division, no BigInteger, so it
 ;; runs in the browser too (did:key 'z' multibase). ──────────────────────────
 (def ^:private b58-alphabet "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-(def ^:private b58-idx (into {} (map-indexed (fn [i c] [c i]) b58-alphabet)))
+#?(:kotoba nil
+   :default
+(def ^:private b58-idx (into {} (map-indexed (fn [i c] [c i]) b58-alphabet))))
 
-(defn- ->ints [data] (map #(bit-and (int %) 0xff) (seq data)))
+#?(:kotoba nil
+   :default
+(defn- ->ints [data] (map #(bit-and (int %) 0xff) (seq data))))
 
+#?(:kotoba
+(defn- b58-digits [data :vector-i64] :vector-i64
+  (let [n (vector-count data)]
+    (loop [i 0 digits (vector-i64)]
+      (if (>= i n)
+        digits
+        (recur (+ i 1) (radix-step digits 256 (vector-at data i) 58)))))))
+
+#?(:kotoba
+(defn- leading-zeros [data :vector-i64] :i64
+  (let [n (vector-count data)]
+    (loop [i 0]
+      (if (and (< i n) (= 0 (vector-at data i))) (recur (+ i 1)) i)))))
+
+#?(:kotoba
+(defn- ones [n :i64] :vector-i64
+  (loop [i 0 out (vector-i64)]
+    (if (>= i n) out (recur (+ i 1) (vector-conj out 49))))))
+
+#?(:kotoba
+(defn- b58-letters [digits :vector-i64] :vector-i64
+  (loop [i (- (vector-count digits) 1) out (vector-i64)]
+    (if (< i 0)
+      out
+      (recur (- i 1) (vector-conj out (string-code-point-at b58-alphabet (vector-at digits i))))))))
+
+#?(:kotoba
+(defn base58btc
+  "Bytes to base58btc (Bitcoin alphabet) String."
+  [data :vector-i64] :string
+  (ascii-string (vcat (ones (leading-zeros data)) (b58-letters (b58-digits data))))))
+
+#?(:kotoba nil
+   :default
 (defn base58btc
   "Bytes (a byte-array, Uint8Array, or a seq of 0..255 ints) → base58btc
    (Bitcoin alphabet) String. Pure integer arithmetic — clj + cljs."
@@ -55,8 +149,46 @@
                 [] in)
         nzeros (count (take-while zero? in))]
     (str (apply str (repeat nzeros \1))
-         (apply str (map #(nth b58-alphabet %) (rseq digits))))))
+         (apply str (map #(nth b58-alphabet %) (rseq digits)))))))
 
+#?(:kotoba
+(defn- b58-index [c :i64] :i64
+  (if (< c 128) (string-find-byte b58-alphabet c 0) -1)))
+
+#?(:kotoba
+(defn- b58-bytes [text :string] :vector-i64
+  (let [n (string-byte-length text)]
+    (loop [i 0 bs (vector-i64)]
+      (if (>= i n)
+        bs
+        (let [idx (b58-index (string-code-point-at text i))]
+          (do (assert (>= idx 0))
+              (recur (+ i 1) (radix-step bs 58 idx 256)))))))))
+
+#?(:kotoba
+(defn- leading-ones [text :string] :i64
+  (let [n (string-byte-length text)]
+    (loop [i 0]
+      (if (and (< i n) (= 49 (string-code-point-at text i))) (recur (+ i 1)) i)))))
+
+#?(:kotoba
+(defn- reversed [v :vector-i64] :vector-i64
+  (loop [i (- (vector-count v) 1) out (vector-i64)]
+    (if (< i 0) out (recur (- i 1) (vector-conj out (vector-at v i)))))))
+
+#?(:kotoba
+(defn- zeros [n :i64] :vector-i64
+  (loop [i 0 out (vector-i64)]
+    (if (>= i n) out (recur (+ i 1) (vector-conj out 0))))))
+
+#?(:kotoba
+(defn base58btc-decode
+  "base58btc String to raw bytes. Leading '1's decode to leading zero bytes."
+  [s :string] :vector-i64
+  (vcat (zeros (leading-ones s)) (reversed (b58-bytes s)))))
+
+#?(:kotoba nil
+   :default
 (defn base58btc-decode
   "base58btc String → raw bytes (a byte-array on :clj, a vector of ints on
    :cljs). Leading '1's decode to leading zero bytes. Pure integer
@@ -92,21 +224,27 @@
                [] (seq s))
         nzeros (count (take-while #(= \1 %) s))
         out (concat (repeat nzeros 0) (rseq bytes))]
-    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out))))
+    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out)))))
 
 ;; ── hashing ──────────────────────────────────────────────────────────────────
+#?(:kotoba nil
+   :default
 (defn- byte-seq [b]
-  (mapv #(bit-and (int %) 0xff) b))
+  (mapv #(bit-and (int %) 0xff) b)))
 
+#?(:kotoba nil
+   :default
 (defn- digest-bytes [digest]
   #?(:clj (byte-array (map unchecked-byte digest))
-     :cljs (js/Uint8Array.from (clj->js digest))))
+     :cljs (js/Uint8Array.from (clj->js digest)))))
 
+#?(:kotoba nil
+   :default
 (defn portable-sha256
   "SHA-256 via `kotoba-lang/org-nist-sha2`. Available on every host, and the
   answer this library gives when nothing faster has been installed."
   [b]
-  (digest-bytes (sha2/sha256 (byte-seq b))))
+  (digest-bytes (sha2/sha256 (byte-seq b)))))
 
 ;; ── the digest seam ──────────────────────────────────────────────────────────
 ;;
@@ -142,13 +280,17 @@
 
 #?(:cljs (defonce ^:private sha256-impl (atom portable-sha256)))
 
+#?(:kotoba nil
+   :default
 (def ^:private install-corpus
   "Empty, one byte, a block boundary either side of 64, and a two-block
    message. The boundaries are where a wrong implementation is wrong: padding
    is what `pad` exists for, and a digest that agrees on 32 bytes and disagrees
    on 64 is the one this corpus is here to catch."
-  [0 1 55 56 63 64 65 127 128 129])
+  [0 1 55 56 63 64 65 127 128 129]))
 
+#?(:kotoba nil
+   :default
 (defn install-sha256!
   "Install a faster synchronous SHA-256 `f` (bytes -> 32 bytes), after proving
   it agrees with the portable implementation. Returns the installed fn.
@@ -171,8 +313,10 @@
                (throw (ex-info "multiformats: candidate digest disagrees with SHA-256"
                                {:type :multiformats/digest-mismatch :length n}))))))
        (reset! sha256-impl f)
-       f)))
+       f))))
 
+#?(:kotoba nil
+   :default
 (defn sha256-provider
   "Which digest `sha256` will actually run: `:message-digest` on the JVM,
   `:installed` or `:portable` on ClojureScript.
@@ -193,8 +337,16 @@
   slow one."
   []
   #?(:clj :message-digest
-     :cljs (if (identical? @sha256-impl portable-sha256) :portable :installed)))
+     :cljs (if (identical? @sha256-impl portable-sha256) :portable :installed))))
 
+#?(:kotoba
+(defn sha256
+  "SHA-256 digest bytes (FIPS 180-4), 32 of them."
+  [b :vector-i64] :vector-i64
+  (ksha256/sha256-bytes b)))
+
+#?(:kotoba nil
+   :default
 (defn sha256
   "SHA-256 digest bytes.
 
@@ -205,18 +357,28 @@
   [b]
   #?(:clj (.digest (java.security.MessageDigest/getInstance "SHA-256")
                    (if (bytes? b) b (byte-array (map unchecked-byte (byte-seq b)))))
-     :cljs (@sha256-impl b)))
+     :cljs (@sha256-impl b))))
 
+#?(:kotoba nil
+   :default
 (defn sha384
   "SHA-384 digest bytes (48 bytes). Same backend as `sha256`.
 
   RDFC-1.0 names SHA-384 as an optional canonicalization hash. SHA-384
   is not a truncation of SHA-512, so both backends compute it directly."
   [b]
-  (digest-bytes (sha512/sha384 (byte-seq b))))
+  (digest-bytes (sha512/sha384 (byte-seq b)))))
 
 ;; ── unsigned varint (LEB128) ──────────────────────────────────────────────────
 
+#?(:kotoba
+(defn max-exact
+  "Largest integer both hosts represent exactly, 2^53-1."
+  [] :i64
+  max-exact-v))
+
+#?(:kotoba nil
+   :default
 (def max-exact
   "Largest integer both hosts represent exactly, 2^53-1.
 
@@ -224,8 +386,25 @@
   Three libraries in this workspace encode the same base-128 varint, and they
   have to agree about which values exist -- when they did not, the same octets
   meant different numbers depending on which one read them."
-  9007199254740991)
+  9007199254740991))
 
+#?(:kotoba
+(defn- varint-groups [n :i64] :vector-i64
+  (loop [v n out (vector-i64)]
+    (if (< v 128)
+      (vector-conj out v)
+      (recur (quot v 128) (vector-conj out (bit-or (bit-and v 127) 128)))))))
+
+#?(:kotoba
+(defn varint
+  "Unsigned base-128 varint (LEB128). Traps outside 0..2^53-1, where the
+  hosts throw."
+  [n :i64] :vector-i64
+  (do (assert (and (>= n 0) (<= n max-exact-v)))
+      (varint-groups n))))
+
+#?(:kotoba nil
+   :default
 (defn varint
   "Unsigned base-128 varint (LEB128).
 
@@ -260,8 +439,10 @@
        (if (< v 0x80)
          (conj out v)
          (recur (quot v 128)
-                (conj out (bit-or (bit-and v 0x7f) 0x80)))))))
+                (conj out (bit-or (bit-and v 0x7f) 0x80))))))))
 
+#?(:kotoba nil
+   :default
 (defn varint-decode
   "Read one unsigned base-128 varint (LEB128) at `offset` of a byte-indexable
   `bytes`. Returns `{:value n :next i}`, or `{:error kw}` — never a bare nil.
@@ -310,19 +491,74 @@
             ;; `long overflow` on the JVM instead of reporting the malformed
             ;; input. Found by this function's own :unterminated test.
             (>= groups 7) {:error :unterminated}
-            :else (recur (inc i) (* mult 128) value (inc groups))))))))
+            :else (recur (inc i) (* mult 128) value (inc groups)))))))))
 
 ;; Stable aliases preserve the existing API. CID parsers that do not hash can
 ;; require `multiformats.base32` directly and avoid the SHA/npm dependency.
-(def base32 base32-codec/encode)
-(def base32-decode base32-codec/decode)
+#?(:kotoba
+(defn base32
+  "See multiformats.base32/encode."
+  [bytes :vector-i64] :string
+  (base32-codec/encode bytes)))
+
+#?(:kotoba nil
+   :default
+(def base32 base32-codec/encode))
+#?(:kotoba
+(defn base32-decode
+  "See multiformats.base32/decode."
+  [text :string] :vector-i64
+  (base32-codec/decode text)))
+
+#?(:kotoba nil
+   :default
+(def base32-decode base32-codec/decode))
 
 ;; ── base64url, no padding (multibase prefix `u`, RFC 4648 §5) ────────────────
 (def ^:private b64url-alphabet
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+#?(:kotoba nil
+   :default
 (def ^:private b64url-idx
-  (into {} (map-indexed (fn [i c] [c i]) b64url-alphabet)))
+  (into {} (map-indexed (fn [i c] [c i]) b64url-alphabet))))
 
+#?(:kotoba
+(defn- b64-code [i :i64] :i64
+  (string-code-point-at b64url-alphabet i)))
+
+#?(:kotoba
+(defn- b64-chunk
+  "The n+1 characters (as codes) of the N-byte chunk starting at I of BS."
+  [bs :vector-i64 i :i64 n :i64] :vector-i64
+  (let [b0 (vector-at bs i)
+        b1 (if (> n 1) (vector-at bs (+ i 1)) 0)
+        b2 (if (> n 2) (vector-at bs (+ i 2)) 0)
+        v (bit-or (bit-or (i64-shift-left b0 16) (i64-shift-left b1 8)) b2)
+        all (vector-conj (vector-conj (vector-conj (vector-conj (vector-i64)
+                (b64-code (bit-and (i64-shift-right v 18) 63)))
+                (b64-code (bit-and (i64-shift-right v 12) 63)))
+                (b64-code (bit-and (i64-shift-right v 6) 63)))
+                (b64-code (bit-and v 63)))]
+    (loop [k 0 out (vector-i64)]
+      (if (> k n) out (recur (+ k 1) (vector-conj out (vector-at all k))))))))
+
+#?(:kotoba
+(defn- b64-codes [bs :vector-i64] :vector-i64
+  (let [total (vector-count bs)]
+    (loop [i 0 out (vector-i64)]
+      (if (>= i total)
+        out
+        (let [n (min 3 (- total i))]
+          (recur (+ i 3) (vcat out (b64-chunk bs i n)))))))))
+
+#?(:kotoba
+(defn base64url
+  "Bytes to base64url without padding (RFC 4648 section 5)."
+  [bytes :vector-i64] :string
+  (ascii-string (b64-codes (kbytes/->bytes bytes)))))
+
+#?(:kotoba nil
+   :default
 (defn base64url
   "Bytes to base64url without padding (RFC 4648 §5)."
   [bytes]
@@ -338,8 +574,41 @@
                        (bit-and (bit-shift-right v 6) 0x3f)
                        (bit-and v 0x3f)]]
             (map #(nth b64url-alphabet %) (take (inc n) chars)))))
-       (apply str)))
+       (apply str))))
 
+#?(:kotoba
+(defn- b64-index [c :i64] :i64
+  (if (< c 128) (string-find-byte b64url-alphabet c 0) -1)))
+
+#?(:kotoba
+(defn- b64-end
+  "The byte length of TEXT without its trailing '=' run."
+  [text :string] :i64
+  (loop [n (string-byte-length text)]
+    (if (and (> n 0) (= 61 (string-code-point-at text (- n 1)))) (recur (- n 1)) n))))
+
+#?(:kotoba
+(defn- b64-bytes [text :string n :i64] :vector-i64
+  (loop [i 0 buffer 0 bit-count 0 acc (vector-i64)]
+    (if (>= i n)
+      acc
+      (let [idx (b64-index (string-code-point-at text i))]
+        (do (assert (>= idx 0))
+            (let [buffer (bit-or (i64-shift-left (bit-and buffer 4095) 6) idx)
+                  bit-count (+ bit-count 6)]
+              (if (>= bit-count 8)
+                (recur (+ i 1) buffer (- bit-count 8)
+                       (vector-conj acc (bit-and (i64-shift-right buffer (- bit-count 8)) 255)))
+                (recur (+ i 1) buffer bit-count acc)))))))))
+
+#?(:kotoba
+(defn base64url-decode
+  "base64url to raw bytes. Padding is tolerated; bad input traps."
+  [text :string] :vector-i64
+  (b64-bytes text (b64-end text))))
+
+#?(:kotoba nil
+   :default
 (defn base64url-decode
   "base64url to raw bytes. Padding is tolerated; bad input is rejected."
   [text]
@@ -360,7 +629,7 @@
                                   (unsigned-bit-shift-right buffer (- bit-count 8))
                                   0xff)))
                     (recur (rest chars) buffer bit-count acc)))))]
-    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out))))
+    #?(:clj (byte-array (map unchecked-byte out)) :cljs (vec out)))))
 
 ;; ── multihash (sha2-256 = 0x12, length 0x20) ──────────────────────────────────
 ;; Returns an array-like on both platforms (byte-array / Uint8Array), NOT a
@@ -369,6 +638,14 @@
 ;; `boundary?`-style consumers downstream do) silently return nil/0 on a
 ;; ClojureScript PersistentVector instead of throwing, which is exactly the
 ;; kind of gap that stays invisible until it corrupts output.
+#?(:kotoba
+(defn multihash-sha256
+  "The sha2-256 multihash (0x12 0x20 then the digest) of the bytes B."
+  [b :vector-i64] :vector-i64
+  (vcat (vcat (vector-conj (vector-i64) 18) (vector-conj (vector-i64) 32)) (sha256 b))))
+
+#?(:kotoba nil
+   :default
 (defn multihash-sha256 [b]
   (let [h (sha256 b)]
     #?(:clj (byte-array (concat [(unchecked-byte 0x12) (unchecked-byte 0x20)] (seq h)))
@@ -376,43 +653,95 @@
                (aset out 0 0x12)
                (aset out 1 0x20)
                (.set out h 2)
-               out))))
+               out)))))
 
 ;; ── CIDv1 ─────────────────────────────────────────────────────────────────────
 ;; codec multicodecs: raw = 0x55, dag-pb = 0x70, dag-cbor = 0x71
-(def codec-raw 0x55)
-(def codec-dag-cbor 0x71)
+#?(:kotoba
+(defn codec-raw [] :i64 codec-raw-v))
 
+#?(:kotoba nil
+   :default
+(def codec-raw 0x55))
+#?(:kotoba
+(defn codec-dag-cbor [] :i64 codec-dag-cbor-v))
+
+#?(:kotoba nil
+   :default
+(def codec-dag-cbor 0x71))
+
+#?(:kotoba
+(defn cidv1
+  "CIDv1 string from a content codec + a multihash. base32 'b' multibase."
+  [codec :i64 multihash :vector-i64] :string
+  (string-concat "b" (base32 (vcat (vcat (varint 1) (varint codec)) multihash)))))
+
+#?(:kotoba nil
+   :default
 (defn cidv1
   "CIDv1 string from a content codec + a multihash. base32 'b' multibase."
   [codec multihash]
   (let [body (concat (seq (varint 0x01)) (seq (varint codec)) (seq multihash))]
-    (str "b" (base32 #?(:clj (byte-array body) :cljs (vec body))))))
+    (str "b" (base32 #?(:clj (byte-array body) :cljs (vec body)))))))
 
+#?(:kotoba
+(defn cidv1-raw
+  "CIDv1 of raw bytes (codec 0x55)."
+  [b :vector-i64] :string
+  (cidv1 codec-raw-v (multihash-sha256 b))))
+
+#?(:kotoba nil
+   :default
 (defn cidv1-raw
   "CIDv1 of raw bytes (codec 0x55). Byte-identical to
    `ipfs add --cid-version=1 --raw-leaves` for a single block (input ≤ 256 KiB)."
   [b]
-  (cidv1 codec-raw (multihash-sha256 b)))
+  (cidv1 codec-raw (multihash-sha256 b))))
 
+#?(:kotoba
+(defn cidv1-dag-cbor
+  "CIDv1 with the dag-cbor codec (0x71) over sha2-256 of the given bytes."
+  [b :vector-i64] :string
+  (cidv1 codec-dag-cbor-v (multihash-sha256 b))))
+
+#?(:kotoba nil
+   :default
 (defn cidv1-dag-cbor
   "CIDv1 with the dag-cbor codec (0x71) over sha2-256 of the given bytes."
   [b]
-  (cidv1 codec-dag-cbor (multihash-sha256 b)))
+  (cidv1 codec-dag-cbor (multihash-sha256 b))))
 
+#?(:kotoba
+(defn kotoba-cid
+  "CIDv1 dag-cbor sha2-256 of the UTF-8 name string."
+  [name :string] :string
+  (cidv1-dag-cbor (kbytes/utf8-encode name))))
+
+#?(:kotoba nil
+   :default
 (defn kotoba-cid
   "KotobaCid::from_bytes(name) — CIDv1 dag-cbor sha2-256 of the UTF-8 name string.
    Matches the kotoba node's graph/RID content addressing."
   [name]
   (cidv1-dag-cbor #?(:clj (kbytes/utf8-bytes ^String name)
-                     :cljs (.encode (js/TextEncoder.) name))))
+                     :cljs (.encode (js/TextEncoder.) name)))))
 
+#?(:kotoba
+(defn cid->bytes
+  "Decode a base32 'b' multibase CIDv1 back to its (version,codec,multihash) bytes."
+  [cid :string] :vector-i64
+  (let [n (string-byte-length cid)]
+    (do (assert (and (> n 0) (= 98 (string-code-point-at cid 0))))
+        (base32-decode (string-substring cid 1 n))))))
+
+#?(:kotoba nil
+   :default
 (defn cid->bytes
   "Decode a base32 'b' multibase CIDv1 back to its (version,codec,multihash) bytes."
   [cid]
   (when-not (str/starts-with? cid "b")
     (throw (ex-info "expected base32 'b' multibase CID" {:cid cid})))
-  (base32-decode (subs cid 1)))
+  (base32-decode (subs cid 1))))
 
 ;; ── CID disassembly ──────────────────────────────────────────────────────────
 ;; `cidv1` assembles (version, codec, multihash); until 2026-08-20 nothing took
@@ -427,6 +756,8 @@
 ;; one direction is total (`cid->multihash`); the other is not a function, and
 ;; there is deliberately no `multihash->cid`.
 
+#?(:kotoba nil
+   :default
 (defn- byte-view
   "Array-like on both runtimes, never a ClojureScript vector.
 
@@ -438,8 +769,10 @@
   #?(:clj (byte-array (map unchecked-byte xs))
      :cljs (let [out (js/Uint8Array. (count xs))]
              (doseq [[i b] (map-indexed vector xs)] (aset out i (bit-and b 0xff)))
-             out)))
+             out))))
 
+#?(:kotoba nil
+   :default
 (defn cid->parts
   "`{:version :codec :multihash}` of a base32 CIDv1, or `{:error kw}`.
 
@@ -463,8 +796,10 @@
               c
               {:version 1
                :codec (:value c)
-               :multihash (byte-view (subvec bytes (:next c)))})))))))
+               :multihash (byte-view (subvec bytes (:next c)))}))))))))
 
+#?(:kotoba nil
+   :default
 (defn cid->multihash
   "The multihash bytes a CIDv1 carries, or nil.
 
@@ -474,11 +809,16 @@
   caller holding only this cannot reconstruct the CID it came from, and is
   not meant to."
   [cid]
-  (:multihash (cid->parts cid)))
+  (:multihash (cid->parts cid))))
 
 ;; ── file helper (single-block raw CID) — genuinely :clj-only: file I/O differs
 ;; by platform, this isn't a gap the way sha256/CID assembly were. ────────────
-(def ^:const single-block-limit 262144) ; ipfs default chunker = 256 KiB
+#?(:kotoba
+(defn single-block-limit [] :i64 262144))
+
+#?(:kotoba nil
+   :default
+(def ^:const single-block-limit 262144)) ; ipfs default chunker = 256 KiB
 
 #?(:clj
    (defn cid-of-file
@@ -498,13 +838,37 @@
      (throw (ex-info "multiformats.core/cid-of-file is :clj-only (file I/O)" {}))))
 
 ;; ── hex (handy alongside the codecs) ──────────────────────────────────────────
+#?(:kotoba
+(defn hexify [b :vector-i64] :string
+  (kbytes/hex b)))
+
+#?(:kotoba nil
+   :default
 (defn hexify [b]
   #?(:clj (apply str (map #(format "%02x" (bit-and (int %) 0xff)) b))
      :cljs (apply str (map (fn [x]
                              (let [h (.toString (bit-and x 0xff) 16)]
                                (if (= 1 (count h)) (str "0" h) h)))
-                           (seq b)))))
+                           (seq b))))))
 
+#?(:kotoba
+(defn- strip-space [s :string] :string
+  (let [n (string-byte-length s)]
+    (loop [i 0 out (vector-i64)]
+      (if (>= i n)
+        (ascii-string out)
+        (let [c (string-code-point-at s i)]
+          (recur (+ i 1) (if (or (= c 32) (and (>= c 9) (<= c 13))) out (vector-conj out c)))))))))
+
+#?(:kotoba
+(defn unhex [s :string] :vector-i64
+  (match-option (kbytes/unhex (strip-space s))
+    [:option :vector-i64]
+    (none (do (assert false) (vector-i64)))
+    (some bs bs))))
+
+#?(:kotoba nil
+   :default
 (defn unhex [s]
   (let [s (str/replace s #"\s" "")]
     (when (odd? (count s))
@@ -516,4 +880,4 @@
       (throw (ex-info "unhex: odd-length hex string" {:s s})))
     (let [pairs (partition 2 s)]
       #?(:clj (byte-array (map (fn [[a b]] (unchecked-byte (Integer/parseInt (str a b) 16))) pairs))
-         :cljs (vec (map (fn [[a b]] (js/parseInt (str a b) 16)) pairs))))))
+         :cljs (vec (map (fn [[a b]] (js/parseInt (str a b) 16)) pairs)))))))
