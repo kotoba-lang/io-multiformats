@@ -131,3 +131,22 @@ unknown protocol `sock`.
 array whose bytes are signed on the JVM, so 0x91 comes back as -111; without
 the mask the same address encodes differently per platform. There is a test
 against the octet sequence the multiaddr spec documents.
+
+## Pure Kotoba: `multiformats.cid`
+
+[`src/multiformats/cid.kotoba`](src/multiformats/cid.kotoba) assembles a CIDv1
+in pure Kotoba (root ADR-2610082200 §16): unsigned LEB128 varints, RFC 4648
+lower-case base32 without padding, and `"b" + base32(varint 1 ++ varint codec ++
+0x12 0x20 ++ digest)`. It has no effects. The digest comes from the
+`hash/sha256` capability in
+[`src/multiformats/cid_hash.kotoba`](src/multiformats/cid_hash.kotoba)
+(`cidv1-raw-text`, `kotoba-cid`); a guest using it declares `[:cap/call 3]`.
+`multiformats.core` stays as the oracle (`migration/cid-v1.edn`).
+
+```bash
+kbb --backend sci --classpath "src:$(kbb -Spath)" scripts/cid-oracle-cases.cljk
+```
+
+asks `multiformats.core` every question the Kotoba tests assert (18 cases,
+2026-10-09). `cid.kotoba`'s four `test-*` pass on wasm32-browser
+(`--fuel 5000000`).
