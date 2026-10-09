@@ -24,7 +24,13 @@
    [:raw-text "" "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"]
    [:raw-text "hello" "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq"]
    [:kotoba-cid "x" "bafyreibnoelefnzgwbcacyt4vh52ymxvzbjq7mmqhtcnwarfq4lzegsiqe"]
-   [:kotoba-cid "kotoba://graph/g1" "bafyreiaachh7zsqfhfhdldkd2q76z5c2xn33nxiue762efim53xqbep6ei"]])
+   [:kotoba-cid "kotoba://graph/g1" "bafyreiaachh7zsqfhfhdldkd2q76z5c2xn33nxiue762efim53xqbep6ei"]
+   [:base32-decode "" []] [:base32-decode "aa" [0]] [:base32-decode "aaaqf7y" [0 1 2 255]]
+   [:base32-decode "mzxw6ytboi" [102 111 111 98 97 114]]
+   [:cid->bytes "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+    [1 85 18 32 227 176 196 66 152 252 28 20 154 251 244 200 153 111 185 36 39 174 65 228 100 155 147 76 164 149 153 27 120 82 184 85]]
+   [:cid->bytes "bafyreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq"
+    [1 113 18 32 44 242 77 186 95 176 163 14 38 232 59 42 197 185 226 158 27 22 30 92 31 167 66 94 115 4 51 98 147 139 152 36]]])
 
 (defn- bytes [v] (byte-array (map unchecked-byte v)))
 
@@ -35,7 +41,9 @@
     :cidv1 (let [[codec hex] args]
              (mf/cidv1 codec (bytes (concat [0x12 0x20] (map #(bit-and % 0xff) (mf/unhex hex))))))
     :raw-text (mf/cidv1-raw (kb/utf8-bytes (first args)))
-    :kotoba-cid (mf/kotoba-cid (first args))))
+    :kotoba-cid (mf/kotoba-cid (first args))
+    :base32-decode (vec (map #(bit-and % 0xff) (mf/base32-decode (first args))))
+    :cid->bytes (vec (map #(bit-and % 0xff) (mf/cid->bytes (first args))))))
 
 (let [bad (remove (fn [c] (= (last c) (oracle (butlast c)))) cases)]
   (doseq [c bad] (println "DISAGREE" (pr-str (butlast c)) "expected" (pr-str (last c)) "oracle" (pr-str (oracle (butlast c)))))
