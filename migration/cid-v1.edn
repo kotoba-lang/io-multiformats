@@ -17,15 +17,13 @@
   :support-capabilities {"src/multiformats/cid_hash.kotoba" [[:cap/call 3]]}
   :capability-note "hash/sha256 (catalog wire id 3, :public): lower-case hex
                     sha2-256 of the UTF-8 text"}
- :ported [:varint :base32 :cidv1 :cidv1-raw :kotoba-cid]
- :evidence "scripts/cid-oracle-cases.cljk: 18 cases agree with multiformats.core;
+ :ported [:varint :base32 :cidv1 :cidv1-raw :kotoba-cid :base32-decode :cid->bytes]
+ :evidence "scripts/cid-oracle-cases.cljk: 24 cases agree with multiformats.core;
             cid.kotoba 4/4 test-* on wasm32-browser; cid-hash end to end with
             a host sha256 capability (allowCapabilities [3]): cidv1-raw-text and
             kotoba-cid equal the oracle on 4 inputs, 4 capability calls"
  :not-ported
  {:varint-decode "decoding; a guest that only names content does not need it"
-  :base32-decode "decoding"
-  :cid->bytes "disassembly of a CID string"
   :cid->parts "disassembly of a CID string"
   :cid->multihash "disassembly of a CID string"
   :base58btc "multibase z, used for did:key and libp2p peer ids"
