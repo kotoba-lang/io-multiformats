@@ -10,39 +10,19 @@ permissions:
 
 jobs:
   test:
-    name: clojure -M:test (JDK ${{ matrix.java }})
+    # kbb (JVM-free) runs this repository's .cljk tests; `clojure -M:test`
+    # found none of them and reported "Ran 0 tests" as success
+    # (root ADR-2610100200). A run of zero tests fails here.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        java: ['17', '21']
     steps:
       - uses: actions/checkout@v4
+      - uses: kotoba-lang/kotoba/.github/actions/setup-kbb@485a8e9716a330e616ccb5bc9fa5d45104326382
+      - name: kbb -M:test
+        run: |
+          set -o pipefail
+          kbb -M:test 2>&1 | tee kbb-test.log
+          grep -E '^kbb test: [1-9][0-9]* test\(s\), [0-9]+ pass, 0 fail, 0 error' kbb-test.log
 
-      - name: Setup JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ matrix.java }}
-
-      - name: Setup Clojure CLI
-        uses: DeLaGuardo/setup-clojure@13.1
-        with:
-          cli: latest
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cache m2 / gitlibs
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.m2
-            ~/.gitlibs
-          key: ${{ runner.os }}-jdk${{ matrix.java }}-clj-${{ hashFiles('deps.edn') }}
-          restore-keys: |
-            ${{ runner.os }}-jdk${{ matrix.java }}-clj-
-
-      - name: Run tests
-        run: clojure -M:test
 
   test-cljs:
     name: shadow-cljs node-test (real ClojureScript, not just .cljc-named)
