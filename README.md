@@ -1,6 +1,6 @@
 # multiformats-clj
 
-[![CI](https://github.com/kotoba-lang/multiformats/actions/workflows/ci.yml/badge.svg)](https://github.com/kotoba-lang/multiformats/actions/workflows/ci.yml)
+[![CI](https://github.com/kotoba-lang/io-multiformats/actions/workflows/ci.yml/badge.svg)](https://github.com/kotoba-lang/io-multiformats/actions/workflows/ci.yml)
 
 **base58 · base32 · varint · sha2-256 multihash · CIDv1 · multiaddr — real `.cljc`,
 verified on both the JVM and ClojureScript, babashka-friendly. Compute a
@@ -43,7 +43,7 @@ Two correctness pitfalls found while verifying this under the real
 deps.edn (git dep):
 
 ```clojure
-io.github.com-junkawasaki/multiformats-clj {:git/sha "<sha>"}
+io.github.kotoba-lang/io-multiformats {:git/sha "<sha>"}
 ```
 
 ## Use
