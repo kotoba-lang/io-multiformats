@@ -1,13 +1,8 @@
 ;; multiformats.cid -- CIDv1 assembly in pure Kotoba.
 ;;
-;; root ADR-2610082200 §16 (W1): everything below the kotoba app runs in pure
-;; Kotoba. multiformats.core (core.cljk) stays as the oracle -- it is host code
-;; (reader conditionals, java.security.MessageDigest, platform byte arrays) and
-;; is reached by 21 of the 37 measured repos. This module is the canonical form
-;; of the part every one of them needs: turning a sha2-256 digest into a CIDv1
-;; string. The digest itself comes from the hash/sha256 capability (see
-;; multiformats.cid-hash), because §16 takes crypto as a named capability, not
-;; host code; this module has no effects.
+;; Canonical native CID assembly and structural validation. Historical host
+;; sources and vectors remain migration inventory; no hosted oracle or digest
+;; provider is required by this pure module. CID bytes never grant authority.
 ;;
 ;; Bytes are a :vector-i64 of 0..255. The encodings are the oracle's:
 ;;   varint   unsigned LEB128, low 7 bits first
@@ -15,8 +10,13 @@
 ;;   cidv1    "b" + base32(varint 1 ++ varint codec ++ 0x12 0x20 ++ digest)
 
 (ns multiformats.cid
-  (:export [varint hex->bytes base32 cidv1 base32-valid? base32-decode cid-valid? cid->bytes
-            main test-varint test-hex test-base32 test-cidv1 test-decode test-cid-bytes]))
+  (:export [varint varint-decode hex->bytes hex-valid? base32 cidv1 base32-valid? base32-decode cid-valid? cid->bytes cid->parts
+            main test-varint test-hex test-base32 test-cidv1 test-decode test-cid-bytes])
+  (:schemas {:multiformats.cid/varint [:record :multiformats.cid/varint
+               [[:value :i64] [:next :i64] [:error :keyword]]]
+             :multiformats.cid/parts [:record :multiformats.cid/parts
+               [[:version :i64] [:codec :i64] [:hash-code :i64] [:digest-size :i64]
+                [:multihash :vector-i64] [:digest :vector-i64] [:raw :vector-i64] [:error :keyword]]]}))
 
 (def codec-raw 85)        ; 0x55
 (def codec-dag-cbor 113)  ; 0x71
@@ -28,29 +28,54 @@
       (if (>= i n) acc (recur (+ i 1) (vector-conj acc (vector-at b i)))))))
 
 (defn varint [n :i64] :vector-i64
-  (loop [x n acc (vector-i64)]
+  (if (< n 0) (vector-i64) (loop [x n acc (vector-i64)]
     (if (< x 128)
       (vector-conj acc x)
-      (recur (i64-shift-right x 7) (vector-conj acc (bit-or (bit-and x 127) 128))))))
+      (recur (i64-shift-right x 7) (vector-conj acc (bit-or (bit-and x 127) 128)))))))
+
+;; Multiformats unsigned varints are minimal and at most 9 bytes/63 bits.
+;; Unlike a former host-specific 53-bit limit, every nonnegative native i64
+;; is exact. Error values distinguish truncation, width, bytes and aliases.
+(defn varint-decode [bytes :vector-i64 offset :i64] [:ref :multiformats.cid/varint]
+  (if (or (< offset 0) (> offset (vector-count bytes)))
+    (record-new [:ref :multiformats.cid/varint] 0 offset :offset)
+    (loop [index offset groups 0 value 0]
+      (if (>= index (vector-count bytes))
+        (record-new [:ref :multiformats.cid/varint] 0 index :incomplete)
+        (let [byte (vector-at bytes index) digit (bit-and byte 127)
+              next (bit-or value (i64-shift-left digit (* groups 7)))]
+          (cond (or (< byte 0) (> byte 255)) (record-new [:ref :multiformats.cid/varint] 0 index :byte)
+                (< byte 128) (if (and (> groups 0) (= digit 0))
+                  (record-new [:ref :multiformats.cid/varint] 0 (+ index 1) :noncanonical)
+                  (record-new [:ref :multiformats.cid/varint] next (+ index 1) :none))
+                (= groups 8) (record-new [:ref :multiformats.cid/varint] 0 (+ index 1) :unterminated)
+                :else (recur (+ index 1) (+ groups 1) next)))))))
 
 (defn- nibble [c :i64] :i64
   (if (and (>= c 48) (<= c 57)) (- c 48)
       (if (and (>= c 97) (<= c 102)) (- c 87)
-          (if (and (>= c 65) (<= c 70)) (- c 55) 0))))
+          (if (and (>= c 65) (<= c 70)) (- c 55) -1))))
+
+(defn hex-valid? [hex :string] :bool
+  (let [n (string-byte-length hex)]
+    (and (= (bit-and n 1) 0)
+      (loop [i 0] (cond (= i n) true (< (nibble (string-code-point-at hex i)) 0) false :else (recur (+ i 1)))))))
 
 (defn hex->bytes [hex :string] :vector-i64
-  (let [n (quot (string-length hex) 2)]
+  (if (not (hex-valid? hex)) (vector-i64) (let [n (quot (string-length hex) 2)]
     (loop [i 0 acc (vector-i64)]
       (if (>= i n)
         acc
         (recur (+ i 1)
                (vector-conj acc (+ (* 16 (nibble (string-code-point-at hex (* 2 i))))
-                                   (nibble (string-code-point-at hex (+ (* 2 i) 1))))))))))
+                                   (nibble (string-code-point-at hex (+ (* 2 i) 1)))))))))))
 
 (defn- letter [i :i64] :string
   (string-substring alphabet i (+ i 1)))
 
 (defn base32 [bytes :vector-i64] :string
+  (if (not (loop [i 0] (cond (= i (vector-count bytes)) true
+     (or (< (vector-at bytes i) 0) (> (vector-at bytes i) 255)) false :else (recur (+ i 1))))) ""
   (let [n (vector-count bytes)]
     (loop [i 0 buffer 0 bits 0 out ""]
       (if (>= i n)
@@ -65,12 +90,13 @@
                                      (letter (bit-and (i64-shift-right buffer b2) 31)))]
               (recur (+ i 1) buffer b2 out))
             (recur (+ i 1) buffer (- bits 5)
-                   (string-concat out (letter (bit-and (i64-shift-right buffer (- bits 5)) 31))))))))))
+                   (string-concat out (letter (bit-and (i64-shift-right buffer (- bits 5)) 31)))))))))))
 
 (defn cidv1 [codec :i64 digest-hex :string] :string
+  (if (or (< codec 0) (not= (string-byte-length digest-hex) 64) (not (hex-valid? digest-hex))) ""
   (string-concat "b"
                  (base32 (append (append (append (varint 1) (varint codec)) (vector-i64 18 32))
-                                 (hex->bytes digest-hex)))))
+                                 (hex->bytes digest-hex))))))
 
 ;; --- decoding: a CID string back to its bytes ------------------------------
 ;; DAG-CBOR writes a link as tag 42 over 0x00 ++ the binary CID, so a guest that
@@ -85,10 +111,13 @@
 
 (defn base32-valid? [text :string] :bool
   (let [n (string-length text)]
-    (loop [i 0]
+    (and (loop [i 0]
       (if (>= i n)
         true
-        (if (< (letter-value (string-code-point-at text i)) 0) false (recur (+ i 1)))))))
+        (if (< (letter-value (string-code-point-at text i)) 0) false (recur (+ i 1)))))
+      (let [bits (bit-and (* n 5) 7)]
+        (and (< bits 5) (or (= bits 0)
+          (= (bit-and (letter-value (string-code-point-at text (- n 1))) (- (i64-shift-left 1 bits) 1)) 0)))))))
 
 (defn base32-decode [text :string] :vector-i64
   (if (not (base32-valid? text))
@@ -105,15 +134,41 @@
                      (vector-conj acc (bit-and (i64-shift-right buffer (- bits 8)) 255)))
               (recur (+ i 1) buffer bits acc))))))))
 
+(defn- slice [bytes :vector-i64 start :i64 end :i64] :vector-i64
+  (loop [i start out (vector-i64)]
+    (if (= i end) out (recur (+ i 1) (vector-conj out (vector-at bytes i))))))
+(defn- bad-parts [error :keyword] [:ref :multiformats.cid/parts]
+  (record-new [:ref :multiformats.cid/parts] 0 0 0 0 (vector-i64) (vector-i64) (vector-i64) error))
+(defn cid->parts [cid :string] [:ref :multiformats.cid/parts]
+  (if (or (<= (string-byte-length cid) 1) (not (string=? (string-substring cid 0 1) "b")))
+    (bad-parts :not-base32-cid)
+    (let [text (string-substring cid 1 (string-byte-length cid))]
+      (if (not (base32-valid? text)) (bad-parts :not-base32-cid)
+        (let [raw (base32-decode text) version (varint-decode raw 0)
+              ve (record-get [:ref :multiformats.cid/varint] version :error)]
+          (cond (not= ve :none) (bad-parts ve)
+                (not= (record-get [:ref :multiformats.cid/varint] version :value) 1) (bad-parts :not-cidv1)
+                :else (let [codec (varint-decode raw (record-get [:ref :multiformats.cid/varint] version :next))
+                            ce (record-get [:ref :multiformats.cid/varint] codec :error)
+                            mh (record-get [:ref :multiformats.cid/varint] codec :next)
+                            hash (if (= ce :none) (varint-decode raw mh) codec)
+                            he (record-get [:ref :multiformats.cid/varint] hash :error)
+                            len (if (= he :none) (varint-decode raw (record-get [:ref :multiformats.cid/varint] hash :next)) hash)
+                            le (record-get [:ref :multiformats.cid/varint] len :error)
+                            start (record-get [:ref :multiformats.cid/varint] len :next)
+                            size (record-get [:ref :multiformats.cid/varint] len :value)]
+                  (cond (not= ce :none) (bad-parts ce) (not= he :none) (bad-parts he) (not= le :none) (bad-parts le)
+                        (not= size (- (vector-count raw) start)) (bad-parts :digest-length)
+                        :else (record-new [:ref :multiformats.cid/parts] 1
+                          (record-get [:ref :multiformats.cid/varint] codec :value)
+                          (record-get [:ref :multiformats.cid/varint] hash :value) size
+                          (slice raw mh (vector-count raw)) (slice raw start (vector-count raw)) raw :none)))))))))
+
 (defn cid-valid? [cid :string] :bool
-  (and (> (string-length cid) 1)
-       (string=? (string-substring cid 0 1) "b")
-       (base32-valid? (string-substring cid 1 (string-byte-length cid)))))
+  (= (record-get [:ref :multiformats.cid/parts] (cid->parts cid) :error) :none))
 
 (defn cid->bytes [cid :string] :vector-i64
-  (if (cid-valid? cid)
-    (base32-decode (string-substring cid 1 (string-byte-length cid)))
-    (vector-i64)))
+  (record-get [:ref :multiformats.cid/parts] (cid->parts cid) :raw))
 
 ;; --- tests: answers produced by multiformats.core on 2026-10-09 -------------
 
